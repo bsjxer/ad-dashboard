@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>구글 · 틱톡 광고 성과 대시보드</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e5e4de;
+    --text-primary: #171715;
+    --text-secondary: #5f5e5a;
+    --text-muted: #898781;
+    --blue: #2a78d6;
+    --blue-bg: #e6f1fb;
+    --blue-dark: #0c447c;
+    --coral: #d85a30;
+    --coral-bg: #faece7;
+    --coral-dark: #712b13;
+    --green: #1baf7a;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121211;
+      --surface: #1a1a19;
+      --border: #2c2c2a;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, Roboto, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 1.75rem; }
+  h1 { font-size: 20px; font-weight: 500; margin: 0; }
+  .sub { font-size: 13px; color: var(--text-muted); margin: 4px 0 0; }
+  .controls { display: flex; align-items: center; gap: 8px; }
+  select, button {
+    font-size: 13px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 0.5px solid var(--border);
+    background: var(--surface);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--text-muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 1.5rem; }
+  .card { background: var(--surface); border-radius: var(--radius); border: 0.5px solid var(--border); padding: 1.1rem 1.25rem; }
+  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 500; font-size: 14px; }
+  .icon.google { background: var(--blue-bg); color: var(--blue-dark); }
+  .icon.tiktok { background: var(--coral-bg); color: var(--coral-dark); }
+  .card-title { font-weight: 500; font-size: 15px; margin: 0; }
+  .card-desc { font-size: 12px; color: var(--text-secondary); margin: 2px 0 0; }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .metric { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+  .metric-label { font-size: 12px; color: var(--text-secondary); margin: 0 0 4px; }
+  .metric-value { font-size: 17px; font-weight: 500; margin: 0; }
+  .chart-block { background: var(--surface); border-radius: var(--radius); border: 0.5px solid var(--border); padding: 1.25rem; margin-bottom: 1rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; font-size: 12px; color: var(--text-secondary); }
+  .legend span { display: flex; align-items: center; gap: 4px; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; }
+  .chart-wrap { position: relative; width: 100%; height: 240px; }
+  .chart-wrap.short { height: 180px; }
+  .state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); font-size: 14px; }
+  .error { color: var(--coral-dark); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>구글 · 틱톡 광고 성과 대시보드</h1>
+      <p class="sub" id="updated">불러오는 중…</p>
+    </div>
+    <div class="controls">
+      <select id="range">
+        <option value="last_7d">최근 7일</option>
+        <option value="last_14d">최근 14일</option>
+        <option value="last_30d">최근 30일</option>
+      </select>
+      <button id="refresh">새로고침</button>
+    </div>
+  </header>
+
+  <div id="content">
+    <div class="state">데이터를 불러오는 중입니다…</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const GOOGLE_URL = 'https://dusk-team-keys.vercel.app/api/google-daily?key=dgk_YXw3OTE1Mzc5MDk2fGtk.b34ebdebd2db0c0de0ee0d1a5df3a75a';
+const TIKTOK_URL = 'https://dusk-team-keys.vercel.app/api/tiktok-daily?key=dtk_dHR8NzM2OTEyNzc0MTc5NjYzMDUyOXxrZA.81da5fccb99ee41eed4a8ce98ea5fa53';
+
+const content = document.getElementById('content');
+const updated = document.getElementById('updated');
+const rangeSel = document.getElementById('range');
+let charts = [];
+
+function fmtWon(n) { return '₩' + Math.round(n).toLocaleString(); }
+function fmtPct(n) { return (n * 100).toFixed(2) + '%'; }
+function fmtNum(n) { return Math.round(n).toLocaleString(); }
+function fmtCompact(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return fmtNum(n);
+}
+
+function sumRows(rows) {
+  const totals = { spend: 0, revenue: 0, purchases: 0, clicks: 0, impressions: 0 };
+  rows.forEach(r => {
+    totals.spend += r.spend || 0;
+    totals.revenue += r.revenue || 0;
+    totals.purchases += r.purchases || 0;
+    totals.clicks += r.clicks || 0;
+    totals.impressions += r.impressions || 0;
+  });
+  totals.roas = totals.spend ? totals.revenue / totals.spend : 0;
+  totals.cpa = totals.purchases ? totals.spend / totals.purchases : 0;
+  totals.cpc = totals.clicks ? totals.spend / totals.clicks : 0;
+  totals.ctr = totals.impressions ? totals.clicks / totals.impressions : 0;
+  totals.cvr = totals.clicks ? totals.purchases / totals.clicks : 0;
+  return totals;
+}
+
+function cardHtml(kind, label, brand, t) {
+  const iconCls = kind === 'google' ? 'google' : 'tiktok';
+  const iconChar = kind === 'google' ? 'G' : 'T';
+  return `
+  <div class="card">
+    <div class="card-head">
+      <div class="icon ${iconCls}">${iconChar}</div>
+      <div>
+        <p class="card-title">${label}</p>
+        <p class="card-desc">${brand}</p>
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><p class="metric-label">지출</p><p class="metric-value">${fmtWon(t.spend)}</p></div>
+      <div class="metric"><p class="metric-label">매출</p><p class="metric-value">${fmtWon(t.revenue)}</p></div>
+      <div class="metric"><p class="metric-label">ROAS</p><p class="metric-value">${fmtPct(t.roas)}</p></div>
+      <div class="metric"><p class="metric-label">구매</p><p class="metric-value">${fmtNum(t.purchases)}건</p></div>
+      <div class="metric"><p class="metric-label">클릭 / 노출</p><p class="metric-value" style="font-size:15px;">${fmtCompact(t.clicks)} / ${fmtCompact(t.impressions)}</p></div>
+      <div class="metric"><p class="metric-label">CTR / CVR</p><p class="metric-value" style="font-size:15px;">${fmtPct(t.ctr)} / ${fmtPct(t.cvr)}</p></div>
+    </div>
+  </div>`;
+}
+
+async function load() {
+  charts.forEach(c => c.destroy());
+  charts = [];
+  content.innerHTML = '<div class="state">데이터를 불러오는 중입니다…</div>';
+  const range = rangeSel.value;
+  try {
+    const [gRes, tRes] = await Promise.all([
+      fetch(`${GOOGLE_URL}&range=${range}`),
+      fetch(`${TIKTOK_URL}&range=${range}`)
+    ]);
+    if (!gRes.ok || !tRes.ok) throw new Error('API 응답 오류');
+    const gData = await gRes.json();
+    const tData = await tRes.json();
+    const g = sumRows(gData.rows || []);
+    const t = sumRows(tData.rows || []);
+    const gBrand = (gData.rows || []).map(r => r.brand).filter(Boolean).join(', ') || '-';
+    const tBrand = (tData.rows || []).map(r => r.brand).filter(Boolean).join(', ') || '-';
+
+    content.innerHTML = `
+      <div class="grid">
+        ${cardHtml('google', 'Google Ads', gBrand, g)}
+        ${cardHtml('tiktok', 'TikTok Ads', tBrand, t)}
+      </div>
+      <div class="chart-block">
+        <div class="legend">
+          <span><span class="dot" style="background:#2a78d6;"></span>지출</span>
+          <span><span class="dot" style="background:#1baf7a;"></span>매출</span>
+        </div>
+        <div class="chart-wrap"><canvas id="spendRevenueChart" role="img" aria-label="구글과 틱톡의 지출 대비 매출 비교"></canvas></div>
+      </div>
+      <div class="chart-block">
+        <div class="legend"><span><span class="dot" style="background:#2a78d6;"></span>ROAS (%)</span></div>
+        <div class="chart-wrap short"><canvas id="roasChart" role="img" aria-label="구글과 틱톡의 ROAS 비교"></canvas></div>
+      </div>
+    `;
+
+    const c1 = new Chart(document.getElementById('spendRevenueChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Google', 'TikTok'],
+        datasets: [
+          { label: '지출', data: [g.spend, t.spend], backgroundColor: '#2a78d6', borderRadius: 4, maxBarThickness: 28 },
+          { label: '매출', data: [g.revenue, t.revenue], backgroundColor: '#1baf7a', borderRadius: 4, maxBarThickness: 28 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + fmtWon(ctx.parsed.y) } } },
+        scales: {
+          y: { ticks: { callback: v => fmtCompact(v), color: '#898781' }, grid: { color: '#e1e0d9' } },
+          x: { ticks: { color: '#5f5e5a' }, grid: { display: false } }
+        }
+      }
+    });
+    const c2 = new Chart(document.getElementById('roasChart'), {
+      type: 'bar',
+      data: {
+        labels: ['Google', 'TikTok'],
+        datasets: [{ label: 'ROAS', data: [g.roas * 100, t.roas * 100], backgroundColor: ['#85B7EB', '#378ADD'], borderRadius: 4, maxBarThickness: 32 }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => 'ROAS: ' + ctx.parsed.x.toFixed(1) + '%' } } },
+        scales: {
+          x: { ticks: { callback: v => v + '%', color: '#898781' }, grid: { color: '#e1e0d9' } },
+          y: { ticks: { color: '#5f5e5a' }, grid: { display: false } }
+        }
+      }
+    });
+    charts = [c1, c2];
+    updated.textContent = '마지막 업데이트: ' + new Date().toLocaleString('ko-KR');
+  } catch (err) {
+    content.innerHTML = `<div class="state error">데이터를 불러오지 못했습니다: ${err.message}</div>`;
+    updated.textContent = '업데이트 실패';
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', load);
+rangeSel.addEventListener('change', load);
+load();
+</script>
+</body>
+</html>
