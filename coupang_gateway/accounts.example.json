@@ -1,0 +1,15 @@
+{
+  "gateway_token": "",
+  "accounts": {
+    "계정별칭1": {
+      "vendor_id": "A0000xxxx",
+      "access_key": "여기에-access-key",
+      "secret_key": "여기에-secret-key"
+    },
+    "계정별칭2": {
+      "vendor_id": "A0000yyyy",
+      "access_key": "...",
+      "secret_key": "..."
+    }
+  }
+}
