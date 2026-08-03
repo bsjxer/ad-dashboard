@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import json
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -36,3 +37,25 @@ def call(account, method, path, query="", body=None, timeout=30):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     r = requests.request(method, url, headers=headers, data=data, timeout=timeout)
     return r.status_code, r.text
+
+
+def call_all_pages(account, path, query_template, params, page_cap=200):
+    """token 페이지네이션(hasNext/nextToken)을 끝까지 순회해 data 를 모두 합쳐 반환.
+    query_template 은 {token} 을 포함해야 하며, 나머지 자리는 params 로 채운다.
+    성공: (200, [합쳐진 data 리스트]) / 실패: (statuscode, 원본 text)."""
+    items = []
+    token = ""
+    for _ in range(page_cap):
+        p = dict(params)
+        p["token"] = quote(token, safe="")   # nextToken 안전 인코딩
+        query = query_template.format(**p)
+        sc, text = call(account, "GET", path, query)
+        if sc != 200:
+            return sc, text
+        obj = json.loads(text)
+        items.extend(obj.get("data") or [])
+        if obj.get("hasNext") and obj.get("nextToken"):
+            token = obj["nextToken"]
+        else:
+            break
+    return 200, items

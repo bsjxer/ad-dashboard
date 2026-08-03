@@ -17,7 +17,7 @@
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode, unquote, unquote_to_bytes
 
@@ -32,11 +32,16 @@ PORT = int(os.environ.get("COUPANG_GATEWAY_PORT", "8000"))
 #  {vendor} 자리에 업체코드가 들어간다.
 # (검증된 조회형 API. 광고성과/판매정산 등 POST형은 전용 엔드포인트로 추후 추가)
 GET_APIS = [
-    {"slug": "settlement", "label": "판매정산",
+    {"slug": "settlement", "label": "판매정산(주간총액)",
      "path": "/v2/providers/marketplace_openapi/apis/api/v1/settlement-histories",
      "query": "vendorId={vendor}&revenueRecognitionYearMonth={month}",
      # ?month=YYYY-MM 로 월 지정, 생략하면 이번 달
      "note": "월 지정: ?month=YYYY-MM (생략 시 이번 달)"},
+    {"slug": "revenue", "label": "제품별매출(매출내역)", "paged": True,
+     "path": "/v2/providers/openapi/apis/api/v1/revenue-history",
+     "query": "vendorId={vendor}&recognitionDateFrom={from}&recognitionDateTo={to}&maxPerPage=50&token={token}",
+     # ?from=YYYY-MM-DD&to=YYYY-MM-DD (생략 시 최근 7일). 각 주문의 items[]에 제품별 판매액/수량/수수료
+     "note": "기간 지정: ?from=YYYY-MM-DD&to=YYYY-MM-DD (생략 시 최근 7일)"},
 ]
 API_BY_SLUG = {a["slug"]: a for a in GET_APIS}
 
@@ -102,7 +107,10 @@ def render_index(host):
     html.append("<h2>엔드포인트</h2>")
     html.append("<table><thead><tr><th>메서드</th><th>경로</th><th>설명</th></tr></thead><tbody>"
                 "<tr><td>GET</td><td><span class='ep'>/settlement?key=cpg_...</span></td>"
-                "<td>판매정산. <code>&amp;month=YYYY-MM</code> (생략 시 이번 달)</td></tr>"
+                "<td>판매정산(주간 총액). <code>&amp;month=YYYY-MM</code> (생략 시 이번 달)</td></tr>"
+                "<tr><td>GET</td><td><span class='ep'>/revenue?key=cpg_...</span></td>"
+                "<td>제품별 매출(매출내역). <code>&amp;from=YYYY-MM-DD&amp;to=YYYY-MM-DD</code> (생략 시 최근 7일). "
+                "각 주문 items[]에 제품명·수량·판매액·수수료·정산액</td></tr>"
                 "<tr><td>GET</td><td><span class='ep'>/accounts</span></td><td>계정 목록(이름만, JSON)</td></tr>"
                 "</tbody></table>")
 
@@ -235,15 +243,67 @@ class Handler(BaseHTTPRequestHandler):
             if not key or key not in key_map:
                 return self._send(403, {"error": "invalid or missing key"})
             name, acc = key_map[key]
+            now = datetime.now()
+
+            # 이미 배포된 /settlement URL 하나로 [정산 총액 + 제품별 매출] 모두 반환
+            if slug == "settlement":
+                month = q.get("month", [now.strftime("%Y-%m")])[0]
+                # 1) 정산(주간 총액)
+                try:
+                    ssc, stext = coupang_client.call(
+                        acc, "GET", API_BY_SLUG["settlement"]["path"],
+                        "vendorId=%s&revenueRecognitionYearMonth=%s" % (acc["vendor_id"], month))
+                    sobj = json.loads(stext)
+                    settlement = sobj.get("data") if isinstance(sobj, dict) else sobj
+                except Exception as e:
+                    return self._send(502, {"error": "settlement call failed", "detail": str(e)})
+                # 2) 제품별 매출(매출내역) - 해당 월 범위(또는 from/to 지정)
+                y, m = int(month[:4]), int(month[5:7])
+                nextm = ("%d-01-01" % (y + 1)) if m == 12 else ("%d-%02d-01" % (y, m + 1))
+                mend = datetime.strptime(nextm, "%Y-%m-%d") - timedelta(days=1)
+                dfrom = q.get("from", [month + "-01"])[0]
+                dto = q.get("to", [(mend if mend < now else now).strftime("%Y-%m-%d")])[0]
+                rparams = {"vendor": acc["vendor_id"], "from": dfrom, "to": dto}
+                try:
+                    rsc, rev = coupang_client.call_all_pages(
+                        acc, API_BY_SLUG["revenue"]["path"], API_BY_SLUG["revenue"]["query"], rparams)
+                except Exception as e:
+                    return self._send(502, {"error": "revenue call failed", "detail": str(e)})
+                if rsc != 200:
+                    try:
+                        rev = json.loads(rev)
+                    except ValueError:
+                        pass
+                    revenue = {"from": dfrom, "to": dto, "error": rev}
+                else:
+                    revenue = {"from": dfrom, "to": dto, "count": len(rev), "data": rev}
+                return self._send(200, {
+                    "status_code": 200, "account": name, "month": month,
+                    "settlement": settlement, "revenue": revenue,
+                })
+
+            # 그 외 슬러그 (revenue 단독 등)
             api = API_BY_SLUG[slug]
             fmt = {
                 "vendor": acc["vendor_id"],
-                "month": q.get("month", [datetime.now().strftime("%Y-%m")])[0],
+                "month": q.get("month", [now.strftime("%Y-%m")])[0],
+                "from": q.get("from", [(now - timedelta(days=6)).strftime("%Y-%m-%d")])[0],
+                "to": q.get("to", [now.strftime("%Y-%m-%d")])[0],
             }
             path = api["path"].format(**fmt)
-            query = api["query"].format(**fmt)
             try:
-                sc, text = coupang_client.call(acc, "GET", path, query)
+                if api.get("paged"):
+                    sc, result = coupang_client.call_all_pages(acc, path, api["query"], fmt)
+                    if sc != 200:
+                        try:
+                            result = json.loads(result)
+                        except ValueError:
+                            pass
+                        return self._send(sc, {"status_code": sc, "data": result})
+                    return self._send(200, {"status_code": 200, "count": len(result), "data": result})
+                else:
+                    query = api["query"].format(**fmt)
+                    sc, text = coupang_client.call(acc, "GET", path, query)
             except Exception as e:
                 return self._send(502, {"error": "coupang call failed", "detail": str(e)})
             try:

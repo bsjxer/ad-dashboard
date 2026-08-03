@@ -10,7 +10,10 @@
 http://192.168.0.19:8000/settlement?key=cpg_<계정별키>&month=2026-06
 ```
 - `key` 가 계정을 지정 → 그 계정만 조회. 틀린/없는 키 → 403.
-- `month` 생략 시 이번 달.
+- **`/settlement` 하나가 [정산 주간총액 + 제품별 매출]을 함께 반환** (담당자는 이 URL만 쓰면 됨):
+  `{ settlement: [...주간총액...], revenue: {from,to,count,data:[주문별 items[](제품명·수량·판매액·수수료·정산액)]} }`
+- `month` 생략 시 이번 달. revenue 범위는 그 달 전체(또는 `&from=YYYY-MM-DD&to=YYYY-MM-DD`로 지정).
+- 제품별 매출만 따로: `/revenue?key=...&from=...&to=` (생략 시 최근 7일).
 - 이 URL 하나만 프로그램/클로드코드/엑셀에 붙이면 됨.
 
 ## 파일
@@ -33,10 +36,11 @@ http://192.168.0.19:8000/settlement?key=cpg_<계정별키>&month=2026-06
 2. 담당자에게 각자 URL 배포(위 형식). 키는 `accounts.json`의 `proxy_key`.
 3. PC 켜져 있을 때만 동작(사내망).
 
-## 현재 상태 (2026-07-31)
+## 현재 상태 (2026-08-03)
 - 계정 9개 등록 + 인증/IP 통과 확인.
-- 프록시 키 9개 발급 완료.
-- 엔드포인트: `settlement`(판매정산) 하나. 접근제어(403) 검증됨.
+- 프록시 키 9개 발급 완료. 접근제어(403) 검증됨.
+- 엔드포인트: `settlement`(정산총액+제품별매출 통합), `revenue`(제품별매출 단독, 페이지 자동순회).
+- 쿠팡 매출내역 API: `revenue-history`, token 페이지네이션(첫 페이지 token= 빈값, hasNext/nextToken 순회).
 - setup_gateway.ps1 실행 완료(자동실행 + 방화벽).
 
 ## 확장 방법
