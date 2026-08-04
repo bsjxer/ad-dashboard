@@ -39,6 +39,51 @@ def call(account, method, path, query="", body=None, timeout=30):
     return r.status_code, r.text
 
 
+ORDER_STATUSES = ["ACCEPT", "INSTRUCT", "DEPARTURE", "DELIVERING", "FINAL_DELIVERY", "NONE_TRACKING"]
+
+
+def orders_by_product(account, date_str):
+    """지정일(createdAt) 주문을 제품별로 집계해 매출(salesPrice×shippingCount)·수량 반환.
+    duskjin 데일리리포트와 동일 방식(판매자배송 ordersheets, 전 상태 합산).
+    성공: (200, {productId 또는 name: {name, productId, quantity, amount}})."""
+    vendor = account["vendor_id"]
+    path = "/v2/providers/openapi/apis/api/v4/vendors/%s/ordersheets" % vendor
+    prod = {}
+    for status in ORDER_STATUSES:
+        token = None
+        while True:
+            q = ("createdAtFrom=%s&createdAtTo=%s&status=%s&maxPerPage=50"
+                 % (date_str, date_str, status))
+            if token:
+                q += "&nextToken=%s" % token
+            # 429 대비 간단 재시도
+            for attempt in range(4):
+                sc, text = call(account, "GET", path, q)
+                if sc == 429 and attempt < 3:
+                    import time
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                break
+            if sc != 200:
+                return sc, text
+            obj = json.loads(text)
+            for o in obj.get("data") or []:
+                for it in o.get("orderItems") or []:
+                    name = it.get("sellerProductName") or it.get("vendorItemName") or "(무명)"
+                    pid = it.get("sellerProductId") or it.get("productId")
+                    cnt = it.get("shippingCount") or 0
+                    amt = int((it.get("salesPrice") or 0) * cnt)
+                    key = pid or name
+                    if key not in prod:
+                        prod[key] = {"productName": name, "productId": pid, "quantity": 0, "amount": 0}
+                    prod[key]["quantity"] += cnt
+                    prod[key]["amount"] += amt
+            token = obj.get("nextToken")
+            if not token:
+                break
+    return 200, prod
+
+
 def call_all_pages(account, path, query_template, params, page_cap=200):
     """token 페이지네이션(hasNext/nextToken)을 끝까지 순회해 data 를 모두 합쳐 반환.
     query_template 은 {token} 을 포함해야 하며, 나머지 자리는 params 로 채운다.
