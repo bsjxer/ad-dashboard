@@ -10,3 +10,24 @@ __pycache__/
 # 원고뽑기 - 유튜브 로그인 쿠키(민감정보, 절대 커밋 금지)
 cookies.txt
 youtube_cookies.txt
+# 프록시 키가 그대로 들어있는 배포용 URL 목록(계정별). 절대 커밋 금지.
+coupang_gateway/담당자_URL*.txt
+
+# 경쟁사 광고 아카이빙 - 페이스북 로그인 세션(민감정보, 절대 커밋 금지)
+경쟁사광고아카이브/browser_profile/
+# 수집 데이터/소재 파일 (용량 큼, 로컬 전용)
+경쟁사광고아카이브/archive.db
+경쟁사광고아카이브/media/
+
+# 경쟁사광고아카이브: 코드만 추적하고 수집물은 로컬에 둔다.
+# 2026-10-12 실측 — mp4 301개 9.2GB · jpg 647개 134MB · browser_profile 433MB.
+# 저장소에 넣으면 clone이 불가능해지고, 서버로 옮길 이유도 없다(참고용 원본이라
+# 개발 서버에서 쓸 일이 없다). archive.db는 바이너리라 커밋마다 전체 사본이 쌓인다.
+경쟁사광고아카이브/media/
+경쟁사광고아카이브/browser_profile/
+경쟁사광고아카이브/*.db
+경쟁사광고아카이브/*.ldb
+경쟁사광고아카이브/*.log
+경쟁사광고아카이브/__pycache__/
+coupang_gateway/_out.txt
+coupang_gateway/_err.txt

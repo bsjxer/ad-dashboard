@@ -1,0 +1,6 @@
+{
+  "targets": [
+    { "brand": "예시브랜드A", "keyword": "예시브랜드A", "max": 100 },
+    { "brand": "예시브랜드B", "page_id": "", "keyword": "예시브랜드B", "max": 100 }
+  ]
+}

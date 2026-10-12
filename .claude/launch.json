@@ -6,6 +6,24 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "5173"],
       "port": 5173
+    },
+    {
+      "name": "budget-recommender",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["C:/Users/bsjxe/Desktop/duskjin/budget_recommender/app.py"],
+      "port": 5051
+    },
+    {
+      "name": "script-live",
+      "runtimeExecutable": "C:/Users/bsjxe/Desktop/duskjin/script_generator/venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app_live:app", "--app-dir", "C:/Users/bsjxe/Desktop/duskjin/script_generator", "--port", "8778"],
+      "port": 8778
+    },
+    {
+      "name": "ad-archive",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:/Users/bsjxe/Desktop/승진/클로드코드/경쟁사광고아카이브/web.py"],
+      "port": 8011
     }
   ]
 }
