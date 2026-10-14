@@ -547,7 +547,7 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
     {% endif %}
 
     {% if c.words %}
-    <h3>신규 광고에 많이 쓴 표현 <span class="stat">↑ = 지난 4주보다 급증</span></h3>
+    <h3>신규 광고에 많이 쓴 표현 <span class="stat">숫자 = 그 표현을 쓴 광고주 수 · ↑ = 지난 4주보다 급증</span></h3>
     <div class="chips">{% for w in c.words %}
       <span class="tag {{ 'new' if w.rising else '' }}">{{ w.word }} {{ w.ads }}{{ ' ↑' if w.rising else '' }}</span>
     {% endfor %}</div>

@@ -6,8 +6,9 @@
   정찰(scout)   카테고리 키워드로 메타 광고 라이브러리를 훑어 새로 시작된 광고를 모은다.
                 텍스트·링크만 저장하고 소재 파일은 받지 않는다. 화면의 "결과 ~N개"도
                 기록해 카테고리 시장 크기 추이를 본다.
-  아카이브      브랜드 레지스트리(brands)에 올린 경쟁사의 페이지만 collect.py로 소재
-                파일까지 받는다.
+  아카이브      브랜드 레지스트리(brands)에 올린 경쟁사 광고만 소재 파일까지 받는다.
+                정찰이 경쟁사 계정·도메인으로 찾은 광고를 그대로 ads 테이블에 넣고,
+                run_archive가 영상·이미지를 내려받는다(지금 게재 중인 광고 기준).
 
 경쟁사는 검색에 안 걸리려고 페이지 이름을 위장한다(아랍어·그리스 문자, '키성장 꿀팁모음'
 같은 정보성 이름). 그래서 브랜드는 **랜딩 도메인**으로 식별한다.
@@ -26,7 +27,7 @@
   python scout.py scout | archive | report [--date D] | print [--date D]
   python scout.py brand list
   python scout.py brand add 브랜드 [--category C] [--page ID] [--domain D] [--term T]
-  python scout.py brand off 브랜드          # 아카이브 중지(정찰 식별은 유지)
+  python scout.py brand off|on 브랜드       # 아카이브 끄기/켜기(정찰 식별은 유지)
 
 로그인 없이 돈다. 제약(2026-10-14 서버에서 실측):
   - 페이지 로드 1번에 노출 많은 순 상위 30건까지만 온다(스크롤은 rate limit).
@@ -192,6 +193,8 @@ class Registry:
         self.events = []   # 이번 실행에서 자동 발견한 것
 
     def reload(self):
+        self.archive_brands = {r["name"] for r in self.con.execute(
+            "SELECT name FROM brands WHERE archive=1")}
         rows = self.con.execute("SELECT * FROM brand_keys").fetchall()
         self.domain = {r["value"]: r["brand"] for r in rows if r["kind"] == "domain"}
         self.page = {r["value"]: r["brand"] for r in rows if r["kind"] == "page"}
@@ -304,6 +307,13 @@ def _store(con, sink, category, keyword, land, reg):
         landing = land.key(ad.get("link_url"))
         brand = reg.attribute(ad.get("page_id"), ad.get("page_name"), landing)
         new += _save_scout_ad(con, ad, category, keyword, landing, brand)
+        if brand in reg.archive_brands:
+            # 경쟁사 광고는 아카이브(ads)에도 넣는다 — 소재는 run_archive가 받는다
+            db.upsert_ad(con, dict(ad, brand=brand, keyword=keyword))
+        if ad.get("page_id") in reg.page and ad.get("page_name"):
+            # 등록 계정의 현재 표시 이름(위장명)을 남겨 둔다 — 이름을 자주 바꾼다
+            con.execute("UPDATE brand_keys SET label=? WHERE kind='page' AND value=?",
+                        (ad["page_name"], ad["page_id"]))
     con.commit()
     return new
 
@@ -392,37 +402,27 @@ def run_scout():
 
 # ---------------------------------------------------------------- 아카이브
 def run_archive():
-    """아카이브 켠 브랜드의 페이지만 소재 파일까지 받는다.
-    처음 받는 페이지는 90일치, 이후엔 마지막 실행 3일 전부터."""
+    """정찰이 아카이브(ads)에 넣은 경쟁사 광고의 소재 파일을 받는다.
+
+    처음엔 collect.collect()의 '날짜 구간 쪼개기'로 과거분까지 받으려 했으나, 그 날짜
+    필터가 '노출 기간'이라 쪼개도 결과가 줄지 않아 계정 하나에 수십 분이 걸렸다
+    (2026-10-14). 정찰이 경쟁사 계정을 매일 열어보므로 그 결과를 그대로 쓴다 —
+    대신 과거에 이미 끝난 광고는 받지 않는다(로그인 없이 볼 방법이 없다).
+    """
     cfg = load_config()
     con = db.connect()
-    sync_config(con, cfg)
-    pages = con.execute(
-        "SELECT k.* FROM brand_keys k JOIN brands b ON b.name=k.brand "
-        "WHERE k.kind='page' AND b.archive=1 ORDER BY k.brand").fetchall()
-    con.close()
-    if not pages:
-        print("[아카이브] 대상 없음")
-        return
-    for k in pages:
-        first = not k["last_run"]
-        since = day(-90) if first else day(-3, k["last_run"])
-        print("[아카이브] %s page:%s %s (since %s)"
-              % (k["brand"], k["value"], k["label"] or "", since), flush=True)
-        try:
-            collect.collect(k["brand"], page_id=k["value"], headless=True,
-                            max_ads=300 if first else 150, since=since, download=True)
-        except Exception as e:
-            print("  실패: %s: %s" % (type(e).__name__, e))
-            continue
-        con = db.connect()
-        con.execute("UPDATE brand_keys SET last_run=? WHERE kind='page' AND value=?",
-                    (db.now(), k["value"]))
-        con.commit()
-        con.close()
+    brands = [r["name"] for r in con.execute("SELECT name FROM brands WHERE archive=1")]
+    for b in brands:
+        n = collect.download_media(con, b, limit=300)
+        print("[아카이브] %s: 소재 %d개 저장" % (b, n), flush=True)
+    # 3일 연속 정찰에서 안 보이면 종료된 것으로 본다
+    con.execute("UPDATE ads SET is_active=0 WHERE is_active=1 AND last_seen<? AND brand IN "
+                "(SELECT name FROM brands WHERE archive=1)", (day(-3) + " 00:00:00",))
+    con.execute("UPDATE brand_keys SET last_run=? WHERE kind='page' AND brand IN "
+                "(SELECT name FROM brands WHERE archive=1)", (db.now(),))
+    con.commit()
 
     # 아카이브한 광고에서도 도메인을 배운다(직접 등록한 계정 → 새 랜딩 도메인)
-    con = db.connect()
     land, reg = Landing(con, cfg), Registry(con, cfg)
     for a in con.execute("SELECT page_id, page_name, link_url FROM ads "
                          "WHERE substr(last_seen,1,10)=?", (today(),)).fetchall():
@@ -442,9 +442,32 @@ you your with our https http www com co kr""".split())
 _TOKEN_RE = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]+")
 
 
+_JOSA = ("으로", "에서", "에게", "까지", "부터", "처럼", "보다", "이", "가", "을", "를",
+         "은", "는", "의", "에", "도", "로", "와", "과")
+
+
+def _stem(t):
+    # 조사 떼기(가격이→가격, 아이가→아이). 두 글자 이하는 건드리지 않는다(아이·키가 깨지지 않게)
+    if len(t) > 2 and "가" <= t[-1] <= "힣":
+        for j in _JOSA:
+            if t.endswith(j) and len(t) - len(j) >= 2:
+                return t[:-len(j)]
+    return t
+
+
 def _tokens(text):
-    return {t.lower() for t in _TOKEN_RE.findall(text or "")
-            if len(t) >= 2 and t.lower() not in STOP}
+    out = set()
+    for t in _TOKEN_RE.findall(text or ""):
+        t = _stem(t.lower())
+        if len(t) >= 2 and t not in STOP:
+            out.add(t)
+    return out
+
+
+def _clean(text, n=None):
+    """보이지 않는 공백(⠀ 등)·줄바꿈을 한 칸으로."""
+    t = re.sub(r"[\s\u2800\u200b\u3164]+", " ", text or "").strip()
+    return t[:n] if n else t
 
 
 def lib_link(ad_id):
@@ -521,7 +544,7 @@ def build_report(date=None):
             new_landings.append({
                 "landing": r["landing"], "ads": r["n"], "first_start": r["sd"],
                 "pages": (r["pages"] or "").split(","),
-                "sample": ((s["title"] or s["body"] or "")[:120] if s else ""),
+                "sample": _clean(s["title"] or s["body"], 120) if s else "",
                 "library": page_link(s["page_id"]) if s else None})
         new_landings.sort(key=lambda b: -b["ads"])
 
@@ -545,19 +568,26 @@ def build_report(date=None):
 
         # 표현: 신규 광고에 많이 나온 단어. 지난 28일 대비 비중이 뛴 것은 '급상승'
         base = [dict(r) for r in con.execute(
-            "SELECT body, title FROM scout_ads WHERE category=? AND "
+            "SELECT body, title, brand, landing, page_id FROM scout_ads WHERE category=? AND "
             "substr(first_seen,1,10) BETWEEN ? AND ?", (cname, d28, d1))]
-        cnt_new, cnt_base = collections.Counter(), collections.Counter()
-        for a in new_ads:
-            cnt_new.update(_tokens((a["body"] or "") + " " + (a["title"] or "")))
-        for a in base:
-            cnt_base.update(_tokens((a["body"] or "") + " " + (a["title"] or "")))
+        # 한 브랜드가 같은 문구로 광고 수십 개를 돌리면 그 단어가 1등이 된다 →
+        # '그 표현을 쓴 광고주 수'로 센다(브랜드/랜딩 단위로 한 번씩).
+        def by_who(rows):
+            g = collections.defaultdict(set)
+            for a in rows:
+                who = a.get("brand") or a.get("landing") or a.get("page_id") or "?"
+                g[who] |= _tokens((a.get("body") or "") + " " + (a.get("title") or ""))
+            c = collections.Counter()
+            for toks in g.values():
+                c.update(toks)
+            return c, max(len(g), 1)
+        cnt_new, n_new = by_who(new_ads)
+        cnt_base, n_base = by_who(base)
         words = []
         for w, c in cnt_new.most_common(40):
             if c < 2:
                 continue
-            rising = bool(base) and (c / max(len(new_ads), 1)
-                                     >= 2 * cnt_base[w] / len(base) + 0.05)
+            rising = bool(base) and (c / n_new >= 2 * cnt_base[w] / n_base + 0.05)
             words.append({"word": w, "ads": c, "rising": rising})
             if len(words) >= 15:
                 break
@@ -565,7 +595,7 @@ def build_report(date=None):
         samples = [{"who": a["brand"] or a["landing"] or a["page_name"],
                     "page_name": a["page_name"], "start_date": a["start_date"],
                     "media_type": a["media_type"],
-                    "text": ((a["title"] or "") + " " + (a["body"] or "")).strip()[:160],
+                    "text": _clean((a["title"] or "") + " " + (a["body"] or ""), 160),
                     "thumb_url": a["thumb_url"], "library": lib_link(a["ad_archive_id"])}
                    for a in new_ads[:12]]
 
@@ -645,8 +675,9 @@ def format_report(rep):
                          % (b["landing"], b["ads"], b["first_start"],
                             "/".join(b["pages"][:3]), b["sample"][:50]))
         if c["words"]:
-            L.append("많이 쓴 표현: " + ", ".join(
-                w["word"] + ("↑" if w["rising"] else "") for w in c["words"][:12]))
+            L.append("많이 쓴 표현(광고주 수): " + ", ".join(
+                "%s %d%s" % (w["word"], w["ads"], "↑" if w["rising"] else "")
+                for w in c["words"][:12]))
     return "\n".join(L)
 
 
