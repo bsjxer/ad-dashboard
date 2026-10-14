@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+from datetime import datetime, timedelta
 import subprocess
 import sys
 from pathlib import Path
@@ -508,6 +509,20 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
     <h2>{{ c.name }} {% if c.ours %}<span class="stat">우리: {{ c.ours }}</span>{% endif %}
       <span class="stat"> · 신규 광고 <b>{{ c.new_ads }}</b>건</span></h2>
 
+    {% if c.competitors %}
+    <h3>등록 경쟁사</h3>
+    <div class="tw"><table class="t">
+      <tr><th>브랜드</th><th class="num">게재 중(포착)</th><th class="num">오늘 신규</th>
+          <th class="num">아카이브 신규</th><th class="num">계정 수</th><th></th></tr>
+      {% for b in c.competitors %}
+      <tr><td><b><a href="{{ url_for('brands_view', brand=b.brand) }}">{{ b.brand }}</a></b></td><td class="num">{{ b.active_ads }}</td>
+        <td class="num">{{ b.new_ads }}</td><td class="num">{{ b.archived_new }}</td>
+        <td class="num">{{ b.pages }}</td>
+        <td><a href="{{ url_for('brands_view', brand=b.brand) }}">광고 보기</a></td></tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+
     <h3>시장 — 키워드별 광고 수</h3>
     <div class="tw"><table class="t">
       <tr><th>키워드</th><th class="num">게재 중</th><th class="num">7일 전 대비</th>
@@ -521,20 +536,6 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
       {% endfor %}
     </table></div>
 
-    {% if c.competitors %}
-    <h3>등록 경쟁사</h3>
-    <div class="tw"><table class="t">
-      <tr><th>브랜드</th><th class="num">게재 중(포착)</th><th class="num">오늘 신규</th>
-          <th class="num">아카이브 신규</th><th class="num">계정 수</th><th></th></tr>
-      {% for b in c.competitors %}
-      <tr><td><b>{{ b.brand }}</b></td><td class="num">{{ b.active_ads }}</td>
-        <td class="num">{{ b.new_ads }}</td><td class="num">{{ b.archived_new }}</td>
-        <td class="num">{{ b.pages }}</td>
-        <td><a href="{{ url_for('index', brand=b.brand) }}">아카이브 보기</a></td></tr>
-      {% endfor %}
-    </table></div>
-    {% endif %}
-
     {% if c.top %}
     <h3>오늘 광고를 많이 낸 곳 (랜딩 기준)</h3>
     <div class="tw"><table class="t">
@@ -542,7 +543,7 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
       {% for t in c.top %}
       <tr><td>{% if t.known %}<b>{{ t.who }}</b> ★{% else %}{{ t.who }}{% endif %}</td>
         <td class="num">{{ t.new_ads }}</td><td>{{ t.pages|join(', ') }}</td>
-        <td>{% if t.known %}<a href="{{ url_for('index', brand=t.who) }}">광고 보기</a>{% elif t.landing %}<a href="{{ url_for('scout_view', landing=t.landing) }}">광고 보기</a>{% else %}<a href="{{ url_for('scout_view', q=t.pages[0]) }}">광고 보기</a>{% endif %}</td></tr>
+        <td>{% if t.known %}<a href="{{ url_for('brands_view', brand=t.who) }}">광고 보기</a>{% elif t.landing %}<a href="{{ url_for('scout_view', landing=t.landing) }}">광고 보기</a>{% else %}<a href="{{ url_for('scout_view', q=t.pages[0]) }}">광고 보기</a>{% endif %}</td></tr>
       {% endfor %}
     </table></div>
     {% endif %}
@@ -747,48 +748,158 @@ def brand_attach():
     return redirect(back if back.startswith("/") else url_for("scout_view"))
 
 
-BRANDS_PAGE = HEAD + EXTRA_CSS + r"""
+BRANDS_CSS = """<style>
+  .tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+         margin-bottom:20px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        overflow:hidden;color:var(--text);display:flex;flex-direction:column}
+  .tile:hover{border-color:var(--accent)}
+  .tile.on{border:2px solid var(--accent)}
+  .tile .cover{aspect-ratio:16/9;background:#0002;overflow:hidden}
+  .tile .cover img{width:100%;height:100%;object-fit:cover}
+  .tile .tb{padding:10px 12px}
+  .tile .nm{font-weight:700;font-size:15px}
+  .tile .nums{display:flex;gap:10px;font-size:12px;color:var(--muted);margin-top:4px;flex-wrap:wrap}
+  .tile .nums b{color:var(--text)}
+  .adgrid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(290px,1fr))}
+  .ad{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;
+      display:flex;flex-direction:column}
+  .ad .m{background:#000;aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;
+         overflow:hidden;min-height:0}
+  .ad .m img,.ad .m video{width:100%;height:100%;object-fit:contain;background:#000}
+  .ad .info{padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:12px}
+  .facts{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0}
+  .facts dt{color:var(--muted)} .facts dd{margin:0}
+  .ad .ttl{font-weight:700;font-size:13px}
+  .ad details.cp summary{list-style:none;cursor:pointer}
+  .ad details.cp summary::-webkit-details-marker{display:none}
+  .ad .clamp{white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:5;
+             -webkit-box-orient:vertical;overflow:hidden}
+  .ad details[open] .clamp{-webkit-line-clamp:unset;display:block}
+  .ad .more{color:var(--accent);font-size:11px}
+  .seg{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+</style>"""
+
+BRANDS_PAGE = HEAD + EXTRA_CSS + BRANDS_CSS + r"""
 <header>
-  <h1>경쟁사 레지스트리</h1>
+  <h1>경쟁사</h1>
   {{ nav|safe }}
 </header>
 <main>
-  <div class="sec"><h2>경쟁사 추가</h2>
-    <form method="post" action="{{ url_for('brand_add') }}" class="inline">
-      <input type="text" name="name" placeholder="브랜드명" required>
-      <select name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select>
-      <input type="text" name="page" placeholder="메타 페이지 ID">
-      <input type="text" name="domain" placeholder="랜딩 도메인 (예: alpha-i.kr)">
-      <input type="text" name="term" placeholder="정확히 일치 검색어">
-      <button>추가</button>
-    </form>
-    <p class="stat" style="margin:8px 0 0">페이지 ID는 광고 라이브러리 주소의 <code>view_all_page_id=</code> 뒤 숫자.
-    계정명은 위장하므로 <b>랜딩 도메인</b>을 넣어 두면 새 위장 계정이 자동으로 묶입니다.</p>
+  <div class="tiles">
+    {% for b in tiles %}
+    <a class="tile {{ 'on' if sel and sel.name == b.name else '' }}" href="{{ url_for('brands_view', brand=b.name) }}">
+      <div class="cover">{% if b.cover %}<img loading="lazy" src="{{ b.cover }}" alt="">{% endif %}</div>
+      <div class="tb">
+        <div class="nm">{{ b.name }}</div>
+        <div class="nums"><span>게재 중 <b>{{ b.active }}</b></span><span>저장 <b>{{ b.total }}</b></span>
+          <span>7일 신규 <b>{{ b.new7 }}</b></span></div>
+        <div class="nums"><span>최근 게시 {{ b.latest or '-' }}</span><span>계정 {{ b.pages }}</span></div>
+      </div>
+    </a>
+    {% else %}<div class="empty">아카이브 중인 브랜드가 없습니다.</div>{% endfor %}
   </div>
-  {% for b in brands %}
+
+  {% if sel %}
   <div class="sec">
-    <h2>{{ b.name }} <span class="stat">{{ b.category or '' }} · 아카이브 {{ b.archived }}건</span>
-      <form method="post" action="{{ url_for('brand_toggle') }}" class="inline" style="float:right">
-        <input type="hidden" name="name" value="{{ b.name }}">
-        <button class="{{ '' if b.archive else 'ghost' }}" name="archive" value="{{ 0 if b.archive else 1 }}">
-          {{ '아카이브 중 (끄기)' if b.archive else '아카이브 꺼짐 (켜기)' }}</button></form></h2>
-    {% if b.note %}<p class="stat" style="margin:0 0 8px">{{ b.note }}</p>{% endif %}
-    <div class="tw"><table class="t">
-      <tr><th>종류</th><th>값</th><th>이름</th><th>출처</th><th>등록</th><th>마지막 수집</th></tr>
-      {% for k in keys[b.name] %}
-      <tr><td>{{ {'page':'계정','domain':'도메인','term':'검색어'}[k.kind] }}</td>
-        <td>{% if k.kind=='page' %}<a href="{{ url_for('scout_view', page=k.value) }}">{{ k.value }}</a>{% else %}{{ k.value }}{% endif %}</td>
-        <td>{{ k.label or '' }}</td>
-        <td>{% if k.source=='auto' %}<span class="tag new">자동 발견</span>{% else %}{{ k.source }}{% endif %}</td>
-        <td class="stat">{{ (k.added_at or '')[:10] }}</td><td class="stat">{{ (k.last_run or '')[:16] }}</td></tr>
-      {% endfor %}
-    </table></div>
-    {% if b.google_advertiser %}<p class="stat" style="margin:8px 0 0">구글:
-      <a target="_blank" rel="noopener" href="https://adstransparency.google.com/advertiser/{{ b.google_advertiser }}?region=KR">광고 투명성 센터</a></p>{% endif %}
+    <h2>{{ sel.name }} <span class="stat">{{ sel.category or '' }} · 계정: {{ sel.labels|join(', ') }}</span></h2>
+    {% if sel.note %}<p class="stat" style="margin:0 0 10px">{{ sel.note }}</p>{% endif %}
+    <form class="seg" method="get">
+      <input type="hidden" name="brand" value="{{ sel.name }}">
+      <select name="status" onchange="this.form.submit()">
+        <option value="">전체 {{ counts.all }}</option>
+        <option value="1" {% if status=='1' %}selected{% endif %}>게재 중 {{ counts.on }}</option>
+        <option value="0" {% if status=='0' %}selected{% endif %}>종료 {{ counts.off }}</option>
+      </select>
+      <select name="media" onchange="this.form.submit()">
+        <option value="">전체 소재</option>
+        <option value="video" {% if media=='video' %}selected{% endif %}>영상</option>
+        <option value="image" {% if media=='image' %}selected{% endif %}>이미지</option>
+      </select>
+      <select name="sort" onchange="this.form.submit()">
+        <option value="new" {% if sort=='new' %}selected{% endif %}>게시일 최신순</option>
+        <option value="long" {% if sort=='long' %}selected{% endif %}>오래 돈 순(성과 추정)</option>
+      </select>
+      <span class="stat">{{ ads|length }}건</span>
+    </form>
+    <div class="adgrid">
+      {% for a in ads %}
+      <div class="ad">
+        <div class="m">
+          {% if a.video %}<video controls preload="none" {% if a.poster %}poster="{{ a.poster }}"{% endif %} src="{{ a.video }}"></video>
+          {% elif a.image %}<img loading="lazy" src="{{ a.image }}" alt="" onclick="openAd('{{ a.ad_archive_id }}')" style="cursor:zoom-in">
+          {% else %}<span class="none">소재 없음</span>{% endif %}
+        </div>
+        <div class="info">
+          <div class="row">
+            {% if a.is_active == 1 %}<span class="tag on">게재 중</span>{% else %}<span class="tag off">종료</span>{% endif %}
+            <span class="tag">{{ {'video':'영상','image':'이미지','text':'텍스트'}.get(a.media_type, a.media_type) }}</span>
+            {% if a.n_media > 1 %}<span class="tag">소재 {{ a.n_media }}개</span>{% endif %}
+            {% if a.is_new %}<span class="tag new">NEW</span>{% endif %}
+          </div>
+          <dl class="facts">
+            <dt>게시일</dt><dd><b>{{ a.start_date or '?' }}</b>{% if a.days is not none %} · {{ a.days }}일째{% endif %}</dd>
+            <dt>{{ '종료' if a.is_active != 1 else '확인' }}</dt><dd>{{ a.end_shown }}</dd>
+            <dt>계정</dt><dd>{{ a.page_name or '-' }}</dd>
+            <dt>채널</dt><dd>{{ a.platforms_ko }}</dd>
+            {% if a.cta_text %}<dt>CTA</dt><dd>{{ a.cta_text }}</dd>{% endif %}
+            {% if a.landing %}<dt>랜딩</dt><dd>{% if a.link_url %}<a href="{{ a.link_url }}" target="_blank" rel="noopener">{{ a.landing }}</a>{% else %}{{ a.landing }}{% endif %}</dd>{% endif %}
+          </dl>
+          {% if a.title %}<div class="ttl">{{ a.title }}</div>{% endif %}
+          {% if a.body %}<details class="cp"><summary><div class="clamp">{{ a.body }}</div>
+            <span class="more">전체 문구</span></summary></details>{% endif %}
+        </div>
+      </div>
+      {% else %}<div class="empty">조건에 맞는 광고가 없습니다.</div>{% endfor %}
+    </div>
   </div>
-  {% else %}<div class="empty">등록된 경쟁사가 없습니다.</div>{% endfor %}
+  {% endif %}
+
+  <details class="run">
+    <summary>경쟁사 관리 (추가 · 계정/도메인 · 아카이브 켜고 끄기)</summary>
+    <div class="sec" style="margin-top:12px"><h2>경쟁사 추가</h2>
+      <form method="post" action="{{ url_for('brand_add') }}" class="inline">
+        <input type="text" name="name" placeholder="브랜드명" required>
+        <select name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select>
+        <input type="text" name="page" placeholder="메타 페이지 ID">
+        <input type="text" name="domain" placeholder="랜딩 도메인 (예: alpha-i.kr)">
+        <input type="text" name="term" placeholder="정확히 일치 검색어">
+        <button>추가</button>
+      </form>
+      <p class="stat" style="margin:8px 0 0">페이지 ID는 광고 라이브러리 주소의 <code>view_all_page_id=</code> 뒤 숫자.
+      계정명은 위장하므로 <b>랜딩 도메인</b>을 넣어 두면 새 위장 계정이 자동으로 묶입니다.</p>
+    </div>
+    {% for b in brands %}
+    <div class="sec">
+      <h2>{{ b.name }} <span class="stat">{{ b.category or '' }} · 저장 {{ b.archived }}건</span>
+        <form method="post" action="{{ url_for('brand_toggle') }}" class="inline" style="float:right">
+          <input type="hidden" name="name" value="{{ b.name }}">
+          <button class="{{ '' if b.archive else 'ghost' }}" name="archive" value="{{ 0 if b.archive else 1 }}">
+            {{ '아카이브 중 (끄기)' if b.archive else '아카이브 꺼짐 (켜기)' }}</button></form></h2>
+      <div class="tw"><table class="t">
+        <tr><th>종류</th><th>값</th><th>이름</th><th>출처</th><th>등록</th></tr>
+        {% for k in keys[b.name] %}
+        <tr><td>{{ {'page':'계정','domain':'도메인','term':'검색어'}[k.kind] }}</td>
+          <td>{% if k.kind=='page' %}<a href="{{ url_for('scout_view', page=k.value) }}">{{ k.value }}</a>{% else %}{{ k.value }}{% endif %}</td>
+          <td>{{ k.label or '' }}</td>
+          <td>{% if k.source=='auto' %}<span class="tag new">자동 발견</span>{% else %}{{ k.source }}{% endif %}</td>
+          <td class="stat">{{ (k.added_at or '')[:10] }}</td></tr>
+        {% endfor %}
+      </table></div>
+      {% if b.google_advertiser %}<p class="stat" style="margin:8px 0 0">구글:
+        <a target="_blank" rel="noopener" href="https://adstransparency.google.com/advertiser/{{ b.google_advertiser }}?region=KR">광고 투명성 센터</a></p>{% endif %}
+    </div>
+    {% endfor %}
+  </details>
 </main>
-"""
+""" + DIALOG
+
+PLATFORM_KO = {"FACEBOOK": "페이스북", "INSTAGRAM": "인스타그램", "AUDIENCE_NETWORK": "오디언스 네트워크",
+               "MESSENGER": "메신저", "THREADS": "스레드", "WHATSAPP": "왓츠앱"}
+
+
+def _media_url(path):
+    return url_for("media_file", path=path) if path and path != "FAILED" else None
 
 
 @app.route("/brands")
@@ -798,11 +909,76 @@ def brands_view():
     keys = {b["name"]: [dict(r) for r in con.execute(
         "SELECT * FROM brand_keys WHERE brand=? ORDER BY kind, added_at", (b["name"],))]
         for b in brands}
+
+    # 맨 위: 아카이브 중인 브랜드 타일
+    tiles = []
+    for b in brands:
+        if not b["archive"]:
+            continue
+        st = con.execute(
+            "SELECT COUNT(*) total, SUM(is_active=1) active, MAX(start_date) latest, "
+            "SUM(first_seen >= datetime('now','localtime','-7 days')) new7 "
+            "FROM ads WHERE brand=?", (b["name"],)).fetchone()
+        cov = con.execute(
+            "SELECT m.local_path FROM media m JOIN ads a ON a.ad_archive_id=m.ad_archive_id "
+            "WHERE a.brand=? AND m.kind IN ('image','thumb') AND m.local_path NOT IN ('','FAILED') "
+            "ORDER BY a.start_date DESC LIMIT 1", (b["name"],)).fetchone()
+        tiles.append({"name": b["name"], "total": st["total"] or 0, "active": st["active"] or 0,
+                      "latest": st["latest"], "new7": st["new7"] or 0, "pages": b["pages"],
+                      "cover": _media_url(cov["local_path"]) if cov else None})
+    tiles.sort(key=lambda t: (-(t["active"]), t["name"]))
+
+    sel, ads, counts = None, [], {}
+    status, media, sort = (request.args.get("status", ""), request.args.get("media", ""),
+                           request.args.get("sort", "new"))
+    name = request.args.get("brand")
+    if not name and tiles:
+        name = tiles[0]["name"]
+    if name:
+        b = next((x for x in brands if x["name"] == name), None)
+        if b:
+            sel = dict(b)
+            sel["labels"] = [k["label"] or k["value"] for k in keys[name] if k["kind"] == "page"]
+            c = con.execute("SELECT COUNT(*) a, SUM(is_active=1) o FROM ads WHERE brand=?",
+                            (name,)).fetchone()
+            counts = {"all": c["a"] or 0, "on": c["o"] or 0, "off": (c["a"] or 0) - (c["o"] or 0)}
+            where, args = ["brand=?"], [name]
+            if status in ("0", "1"):
+                where.append("IFNULL(is_active,0)=?"); args.append(int(status))
+            if media:
+                where.append("media_type=?"); args.append(media)
+            order = ("start_date DESC, first_seen DESC" if sort != "long"
+                     else "julianday(COALESCE(end_date, date('now','localtime'))) - julianday(start_date) DESC")
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM ads WHERE " + " AND ".join(where) + " ORDER BY " + order + " LIMIT 400", args)]
+            today = datetime.now().date()
+            for a in rows:
+                a.pop("raw", None)
+                ms = [dict(m) for m in con.execute(
+                    "SELECT kind, local_path FROM media WHERE ad_archive_id=? AND local_path NOT IN ('','FAILED') "
+                    "ORDER BY id", (a["ad_archive_id"],))]
+                a["video"] = next((_media_url(m["local_path"]) for m in ms if m["kind"] == "video"), None)
+                a["poster"] = next((_media_url(m["local_path"]) for m in ms if m["kind"] == "thumb"), None)
+                a["image"] = next((_media_url(m["local_path"]) for m in ms if m["kind"] == "image"), None) or a["poster"]
+                a["n_media"] = sum(1 for m in ms if m["kind"] in ("video", "image"))
+                end = a["end_date"] if a["is_active"] != 1 else None
+                end = end or (a["last_seen"] or "")[:10] if a["is_active"] != 1 else None
+                try:
+                    s0 = datetime.strptime(a["start_date"], "%Y-%m-%d").date()
+                    e0 = datetime.strptime(end, "%Y-%m-%d").date() if end else today
+                    a["days"] = (e0 - s0).days + 1
+                except Exception:
+                    a["days"] = None
+                a["end_shown"] = (end or "-") if a["is_active"] != 1 else "게재 중 (마지막 확인 %s)" % (a["last_seen"] or "")[5:16]
+                a["platforms_ko"] = ", ".join(PLATFORM_KO.get(p, p.title()) for p in (a["platforms"] or "").split(",") if p) or "-"
+                a["landing"] = scout._host(a["link_url"]) if a["link_url"] else None
+                a["is_new"] = (a["first_seen"] or "") >= (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            ads = rows
     con.close()
     categories = [c["name"] for c in scout.load_config()["categories"]]
-    return render_template_string(BRANDS_PAGE, nav=nav("brands_view"), brands=brands,
-                                  keys=keys, categories=categories,
-                                  page_link=scout.page_link)
+    return render_template_string(BRANDS_PAGE, nav=nav("brands_view"), brands=brands, keys=keys,
+                                  categories=categories, tiles=tiles, sel=sel, ads=ads,
+                                  counts=counts, status=status, media=media, sort=sort)
 
 
 @app.route("/brands/add", methods=["POST"])
