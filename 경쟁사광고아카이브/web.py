@@ -44,6 +44,9 @@ PAGE = r"""
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>경쟁사 광고 아카이브</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#2563eb">
 <style>
   :root{
     --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#1c1f23;
@@ -793,6 +796,28 @@ def brand_toggle():
     con.commit()
     con.close()
     return redirect(url_for("brands_view"))
+
+
+# ---------------------------------------------------------------- PC 앱 설치용
+# 크롬 메뉴 → 저장 및 공유 → 바로가기 만들기(창으로 열기)로 바탕화면 아이콘을 만든다.
+# 자체서명 인증서라 정식 PWA 설치는 안 될 수 있어서, 이름·아이콘만 제공한다.
+ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect width="64" height="64" rx="14" fill="#2563eb"/>
+<circle cx="28" cy="28" r="13" fill="none" stroke="#fff" stroke-width="5"/>
+<path d="M38 38l12 12" stroke="#fff" stroke-width="6" stroke-linecap="round"/></svg>"""
+
+
+@app.route("/icon.svg")
+def icon():
+    return Response(ICON_SVG, mimetype="image/svg+xml")
+
+
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({"name": "경쟁사 광고", "short_name": "경쟁사 광고",
+                    "start_url": "/report", "display": "standalone",
+                    "background_color": "#f6f7f9", "theme_color": "#2563eb",
+                    "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]})
 
 
 if __name__ == "__main__":
