@@ -590,10 +590,36 @@ def _fmt(n):
     return "-" if n is None else "{:,}".format(int(round(n)))
 
 
+def local_thumbs(con, ids):
+    """아카이브에 저장된 광고는 서버 파일 썸네일을 쓴다 — 페이스북 이미지 주소는 며칠 뒤 만료된다."""
+    ids = [i for i in ids if i]
+    if not ids:
+        return {}
+    out = {}
+    for r in con.execute(
+            "SELECT ad_archive_id, local_path, kind FROM media WHERE ad_archive_id IN (%s) "
+            "AND local_path NOT IN ('', 'FAILED') AND kind IN ('image','thumb') "
+            "ORDER BY CASE kind WHEN 'image' THEN 0 ELSE 1 END, id" % ",".join("?" * len(ids)),
+            ids):
+        out.setdefault(r["ad_archive_id"], url_for("media_file", path=r["local_path"]))
+    return out
+
+
 @app.route("/report")
 def report():
     dates = sorted((p.stem for p in db.REPORT_DIR.glob("????-??-??.json")), reverse=True)
     rep = scout.load_report(request.args.get("date") or None)
+    if rep:
+        con = db.connect()
+        ids = [a.get("id") or a["library"].split("id=")[-1]
+               for c in rep["categories"] for a in c["samples"]]
+        local = local_thumbs(con, ids)
+        con.close()
+        for c in rep["categories"]:
+            for a in c["samples"]:
+                lid = local.get(a.get("id") or a["library"].split("id=")[-1])
+                if lid:
+                    a["thumb_url"] = lid
     return render_template_string(REPORT_PAGE, nav=nav("report"), rep=rep, dates=dates,
                                   fmt=_fmt, page_link=scout.page_link)
 
@@ -626,7 +652,7 @@ SCOUT_PAGE = HEAD + EXTRA_CSS + r"""
         {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</div>
       <div class="body">
         <div class="row"><span class="brand">{{ a.brand or a.landing or '-' }}</span>
-          {% if a.brand %}<span class="tag on">등록</span>{% endif %}
+          {% if a.saved %}<span class="tag on">저장됨</span>{% elif a.brand %}<span class="tag">등록</span>{% endif %}
           <span class="tag">{{ a.media_type }}</span></div>
         <span class="stat">{{ a.page_name }} · {{ a.start_date }}</span>
         {% if a.title %}<div style="font-weight:600;font-size:13px">{{ a.title }}</div>{% endif %}
@@ -687,6 +713,10 @@ def scout_view():
         "SELECT * FROM scout_ads" + where + " ORDER BY start_date DESC, first_seen DESC "
         "LIMIT ? OFFSET ?", args + [PER_PAGE, (page - 1) * PER_PAGE])]
     brand_names = [r["name"] for r in con.execute("SELECT name FROM brands ORDER BY name")]
+    local = local_thumbs(con, [a["ad_archive_id"] for a in ads])
+    for a in ads:
+        a["thumb_url"] = local.get(a["ad_archive_id"]) or a["thumb_url"]
+        a["saved"] = a["ad_archive_id"] in local
     con.close()
     categories = [c["name"] for c in scout.load_config()["categories"]]
     qs = "&".join("%s=%s" % (k, v) for k, v in f.items() if v)
