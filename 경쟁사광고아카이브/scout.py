@@ -489,6 +489,13 @@ def build_report(date=None):
     d1, d7, d28 = day(-1, date), day(-7, date), day(-28, date)
     cfg = load_config()
     con = db.connect()
+    # 경쟁사를 나중에 등록하면 그 전에 본 광고는 brand가 비어 있다 → 저장된 랜딩·계정으로 다시 매긴다
+    con.execute(
+        "UPDATE scout_ads SET brand=COALESCE("
+        "(SELECT brand FROM brand_keys WHERE kind='domain' AND value=scout_ads.landing),"
+        "(SELECT brand FROM brand_keys WHERE kind='page' AND value=scout_ads.page_id)) "
+        "WHERE IFNULL(brand,'')=''")
+    con.commit()
 
     brands = {r["name"]: dict(r) for r in con.execute("SELECT * FROM brands")}
     auto_today = [dict(r) for r in con.execute(
