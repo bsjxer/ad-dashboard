@@ -1,0 +1,4 @@
+# 경쟁사 광고 정찰. 07:30 KST — 출근 전에 리포트가 나와 있게.
+SHELL=/bin/bash
+CRON_TZ=Asia/Seoul
+30 7 * * *  root /srv/work/ad-dashboard/경쟁사광고아카이브/deploy/adarchive-daily.sh >> /var/log/adarchive-daily.log 2>&1

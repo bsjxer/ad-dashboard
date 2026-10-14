@@ -25,7 +25,8 @@ from urllib.parse import quote
 import db
 
 ROOT = Path(__file__).resolve().parent
-PROFILE_DIR = ROOT / "browser_profile"
+# 로그인 세션도 수집물과 같은 곳에 둔다(서버에서는 저장소 밖).
+PROFILE_DIR = db.DATA_DIR / "browser_profile"
 
 INIT_SCRIPT = r"""
 (() => {

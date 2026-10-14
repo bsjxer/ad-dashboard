@@ -1,0 +1,16 @@
+[Unit]
+Description=경쟁사 광고 아카이브 대시보드 (gunicorn)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/work/ad-dashboard/경쟁사광고아카이브
+# ADARCHIVE_DATA(수집물 위치) · DASHBOARD_PASSWORD. root만 읽는 파일(600).
+EnvironmentFile=/etc/adarchive/env
+# 127.0.0.1에만 바인드하고 외부 노출은 nginx(8444)가 맡는다.
+ExecStart=/opt/adarchive/venv/bin/gunicorn web:app --bind 127.0.0.1:8011 --timeout 120 --workers 2
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """경쟁사 광고 아카이브 - SQLite 저장소"""
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "archive.db"
-MEDIA_DIR = ROOT / "media"
+# 수집물(DB·소재·브라우저 세션) 위치. PC에서는 기본값 그대로 이 폴더에 쌓이고,
+# 서버에서는 저장소 밖(/srv/data/adarchive)으로 뺀다 — 저장소가 커지지 않게.
+DATA_DIR = Path(os.environ.get("ADARCHIVE_DATA") or ROOT)
+DB_PATH = DATA_DIR / "archive.db"
+MEDIA_DIR = DATA_DIR / "media"
+REPORT_DIR = DATA_DIR / "reports"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ads (
@@ -46,6 +51,75 @@ CREATE TABLE IF NOT EXISTS media (
 );
 CREATE INDEX IF NOT EXISTS idx_media_ad ON media(ad_archive_id);
 
+-- 브랜드 레지스트리. 경쟁사는 페이지 이름을 위장하므로(아랍어·그리스 문자 등)
+-- 이름이 아니라 랜딩 도메인으로 브랜드를 식별한다.
+-- brand_keys.kind: domain = 랜딩 도메인(단축주소는 풀어서), page = 메타 페이지 ID,
+--                  term   = 정확히 일치 검색어(브랜드명·도메인)
+-- source: config(설정 파일) / auto(자동 발견) / web(대시보드) / chat(대화)
+CREATE TABLE IF NOT EXISTS brands (
+    name              TEXT PRIMARY KEY,
+    category          TEXT,
+    archive           INTEGER DEFAULT 1,
+    google_advertiser TEXT,
+    note              TEXT,
+    added_at          TEXT
+);
+CREATE TABLE IF NOT EXISTS brand_keys (
+    kind     TEXT,
+    value    TEXT,
+    brand    TEXT,
+    source   TEXT,
+    label    TEXT,
+    added_at TEXT,
+    last_run TEXT,
+    PRIMARY KEY(kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_bk_brand ON brand_keys(brand);
+
+-- 단축주소(bit.ly 등) → 실제 랜딩 주소 캐시
+CREATE TABLE IF NOT EXISTS links (
+    url         TEXT PRIMARY KEY,
+    final_url   TEXT,
+    resolved_at TEXT
+);
+
+-- 카테고리 정찰. 텍스트·링크만 저장하고 소재 파일은 받지 않는다(용량).
+CREATE TABLE IF NOT EXISTS scout_ads (
+    ad_archive_id TEXT PRIMARY KEY,
+    category      TEXT,
+    keywords      TEXT,
+    page_id       TEXT,
+    page_name     TEXT,
+    is_active     INTEGER,
+    start_date    TEXT,
+    body          TEXT,
+    title         TEXT,
+    cta_text      TEXT,
+    link_url      TEXT,
+    media_type    TEXT,
+    thumb_url     TEXT,
+    landing       TEXT,
+    brand         TEXT,
+    first_seen    TEXT,
+    last_seen     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scout_cat ON scout_ads(category, first_seen);
+CREATE INDEX IF NOT EXISTS idx_scout_page ON scout_ads(page_id);
+CREATE INDEX IF NOT EXISTS idx_scout_landing ON scout_ads(landing);
+
+-- 시장 크기 측정값. 라이브러리 화면의 "결과 ~N개"를 그대로 기록한다.
+-- kind: active  = 그 키워드로 지금 게재 중인 광고 수
+--       started = ref_date에 게재를 시작한 광고 수
+CREATE TABLE IF NOT EXISTS scout_counts (
+    kind        TEXT,
+    ref_date    TEXT,
+    category    TEXT,
+    keyword     TEXT,
+    n           INTEGER,
+    measured_at TEXT,
+    PRIMARY KEY(kind, ref_date, category, keyword)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT,
@@ -67,6 +141,7 @@ def media_key(url):
 
 def connect():
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)

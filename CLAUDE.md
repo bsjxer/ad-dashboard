@@ -42,7 +42,7 @@ cd /srv/work/ad-dashboard   # 이 저장소를 여기서 고친다
 |---|---|
 | 원고뽑기 (`app.py`·`web.py`) | whisper 모델이 로컬에 있고 오프라인으로 처리 |
 | 쿠팡 게이트웨이 | 사내 LAN 팀원에게 URL을 배포하므로 사무실 PC에 떠 있어야 함 |
-| 경쟁사광고아카이브 | 페이스북 로그인 세션이 로컬 브라우저 프로필에 있음 |
+| 경쟁사광고아카이브(옛 PC 수집분) | PC에 모아둔 9GB 소재·로그인 세션. **2026-10-14부터는 서버가 매일 정찰·아카이브한다** — 아래 참고 |
 
 그래서 순서는 **서버에서 고치고 푸시 → PC에서 `git pull` 받아 실행**이다.
 PC 체크아웃에서 직접 고치면 다음 pull에서 충돌하거나 조용히 갈라진다.
@@ -69,6 +69,23 @@ PC 체크아웃에서 직접 고치면 다음 pull에서 충돌하거나 조용�
 올리면 안 되는 것(이미 `.gitignore`에 있다): `coupang_gateway/accounts.json`,
 `coupang_gateway/담당자_URL*.txt`, `.env`, `cookies.txt`·`youtube_cookies.txt`,
 `경쟁사광고아카이브/archive.db`·`media/`·`browser_profile/`, 실행 로그.
+
+## 경쟁사 광고 정찰 (서버에서 돈다, 2026-10-14~)
+
+`경쟁사광고아카이브/`는 이제 **서버 cron이 매일 07:30 KST에 돌린다**(로그인 없이도 됨).
+배포·경로는 `경쟁사광고아카이브/deploy/README.md`.
+
+- 대시보드 `https://64.176.226.7:8444/report` (예산 대시보드와 같은 비밀번호, 사무실 IP만)
+- 수집물 `/srv/data/adarchive` (저장소 밖) · 로그 `/var/log/adarchive-daily.log`
+- **사용자가 "오늘 리포트"라고 하면**: 서버에서
+  `ADARCHIVE_DATA=/srv/data/adarchive /opt/adarchive/venv/bin/python scout.py print`
+  을 읽고 표 몇 줄로 요약한다(동향·신규 브랜드·경쟁사 움직임).
+- **"이거 아카이브해줘"**: `scout.py brand add <브랜드> --category 키영양제 --page <ID> --domain <랜딩>`
+  또는 설정 파일 `scout_config.json`의 brands에 추가(커밋). 다음 실행부터 소재까지 받는다.
+- 경쟁사는 **페이지명을 위장**한다(아랍어·그리스 문자, '키성장 꿀팁모음' 등).
+  이름이 아니라 **랜딩 도메인**으로 묶는다 — 단축주소(bit.ly)는 풀어서 본다.
+- 로그인 없는 제약: 키워드당 노출 상위 30건(+영상·이미지 분할), 날짜 필터는 '노출 기간'이라
+  신규 판별에 못 씀. 그래서 넓은 키워드는 표본, 좁은 키워드(성분명)는 거의 전수.
 
 ## 그 밖에
 

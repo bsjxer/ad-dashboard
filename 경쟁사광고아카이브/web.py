@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
-"""경쟁사 광고 아카이브 - 로컬 웹 대시보드
+"""경쟁사 광고 아카이브 - 웹 대시보드
 
   python web.py           ->  http://localhost:8011
+
+화면: 리포트(일일 정찰 결과) · 정찰(카테고리 신규 광고) · 경쟁사(브랜드 레지스트리) ·
+      아카이브(소재까지 저장한 광고).
+서버에서는 gunicorn으로 띄우고 nginx가 앞에 선다. DASHBOARD_PASSWORD가 있으면
+HTTP Basic 비밀번호를 요구한다(아이디는 무시).
 """
 from __future__ import annotations
 
 import csv
 import io
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,12 +21,23 @@ from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request, send_from_directory, url_for)
 
 import db
+import scout
 
 ROOT = Path(__file__).resolve().parent
-LOG_PATH = ROOT / "collect.log"
-PORT = 8011
+LOG_PATH = db.DATA_DIR / "collect.log"
+PORT = int(os.environ.get("PORT") or 8011)
+PASSWORD = os.environ.get("DASHBOARD_PASSWORD")
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _auth():
+    if PASSWORD:
+        a = request.authorization
+        if not (a and a.password == PASSWORD):
+            return Response("비밀번호가 필요합니다", 401,
+                            {"WWW-Authenticate": 'Basic realm="adarchive"'})
 
 PAGE = r"""
 <!doctype html>
@@ -98,6 +115,7 @@ PAGE = r"""
 
 <header>
   <h1>경쟁사 광고 아카이브</h1>
+  {{ nav|safe }}
   <span class="stat">총 <b>{{ total }}</b>건</span>
   <span class="stat">활성 <b>{{ active_cnt }}</b></span>
   <span class="stat">최근 7일 신규 <b>{{ new_cnt }}</b></span>
@@ -335,7 +353,7 @@ def index():
                         .splitlines()[-25:])
 
     return render_template_string(
-        PAGE, ads=ads, brands=brands, f=f, qs=qs, page=page,
+        PAGE, nav=nav("archive"), ads=ads, brands=brands, f=f, qs=qs, page=page,
         pages=max(1, -(-total_f // PER_PAGE)), total=total,
         active_cnt=active_cnt, new_cnt=new_cnt, log=log)
 
@@ -401,14 +419,368 @@ def run_collect():
         cmd += ["--keyword", keyword]
     if page_id:
         cmd += ["--page-id", page_id]
-    if request.form.get("headless"):
-        cmd += ["--headless"]
+    if request.form.get("headless") or not os.environ.get("DISPLAY"):
+        cmd += ["--headless"]   # 서버에는 화면이 없다
 
     logf = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
     logf.write("\n$ " + " ".join(cmd) + "\n")
     subprocess.Popen(cmd, cwd=str(ROOT), stdout=logf, stderr=logf,
                      stdin=subprocess.DEVNULL)
     return redirect(url_for("index"))
+
+
+# ================================================================ 정찰·리포트·경쟁사
+# 기존 아카이브 화면의 <style>을 그대로 쓴다.
+HEAD = PAGE[:PAGE.index("<header>")]
+
+NAV_ITEMS = [("report", "리포트"), ("scout_view", "정찰"),
+             ("brands_view", "경쟁사"), ("index", "아카이브")]
+
+
+def nav(active):
+    out = ['<nav class="row" style="gap:4px">']
+    for ep, label in NAV_ITEMS:
+        cls = "tag" if ep == active or (active == "archive" and ep == "index") else "tag off"
+        out.append('<a class="%s" href="%s">%s</a>' % (cls, url_for(ep), label))
+    out.append("</nav>")
+    return "".join(out)
+
+
+EXTRA_CSS = """<style>
+  table.t{border-collapse:collapse;width:100%;font-size:13px;background:var(--panel)}
+  table.t th,table.t td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;
+        vertical-align:top}
+  table.t th{color:var(--muted);font-weight:600;font-size:12px}
+  .num{text-align:right!important;font-variant-numeric:tabular-nums}
+  .sec{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+       padding:14px 16px;margin-bottom:16px}
+  .sec h2{font-size:15px;margin:0 0 10px}
+  .sec h3{font-size:13px;margin:14px 0 6px;color:var(--muted)}
+  .tw{overflow-x:auto}
+  .up{color:var(--good)} .down{color:#dc2626}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .note{font-size:12px;color:var(--warn);margin:0 0 12px}
+  form.inline{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
+</style>"""
+
+REPORT_PAGE = HEAD + EXTRA_CSS + r"""
+<header>
+  <h1>경쟁사 광고 리포트</h1>
+  {{ nav|safe }}
+  <span style="flex:1"></span>
+  <form method="get" class="inline">
+    <select name="date" onchange="this.form.submit()">
+      {% for d in dates %}<option {% if rep and d==rep.date %}selected{% endif %}>{{ d }}</option>{% endfor %}
+    </select>
+  </form>
+</header>
+<main>
+{% if not rep %}
+  <div class="empty">아직 리포트가 없습니다. 매일 아침 07:30에 만들어집니다.</div>
+{% else %}
+  {% if rep.baseline_days < 7 %}
+  <p class="note">정찰 {{ rep.baseline_days + 1 }}일째입니다. 추이와 "처음 포착" 항목은 7일이 쌓여야 믿을 만합니다
+  (첫날엔 모든 광고주가 '처음 본 곳'으로 잡힙니다).</p>
+  {% endif %}
+  {% if rep.discovered %}
+  <div class="sec"><h2>★ 오늘 자동 발견</h2>
+    <table class="t">{% for k in rep.discovered %}
+      <tr><td>{{ k.brand }}</td><td>{{ '새 계정' if k.kind=='page' else '새 도메인' }}</td>
+      <td>{% if k.kind=='page' %}<a target="_blank" rel="noopener" href="{{ page_link(k.value) }}">{{ k.label or k.value }}</a>{% else %}{{ k.value }}{% endif %}</td></tr>
+    {% endfor %}</table></div>
+  {% endif %}
+
+  {% for c in rep.categories %}
+  <div class="sec">
+    <h2>{{ c.name }} {% if c.ours %}<span class="stat">우리: {{ c.ours }}</span>{% endif %}
+      <span class="stat"> · 신규 광고 <b>{{ c.new_ads }}</b>건</span></h2>
+
+    <h3>시장 — 키워드별 광고 수</h3>
+    <div class="tw"><table class="t">
+      <tr><th>키워드</th><th class="num">게재 중</th><th class="num">7일 전 대비</th>
+          <th class="num">어제 시작(포착)</th><th class="num">7일 일평균(포착)</th></tr>
+      {% for k in c.keywords %}
+      <tr><td>{{ k.keyword }}</td><td class="num">{{ fmt(k.active) }}</td>
+        <td class="num">{% if k.active is not none and k.active_7d_ago %}
+          {% set p = (k.active - k.active_7d_ago) / k.active_7d_ago * 100 %}
+          <span class="{{ 'up' if p >= 0 else 'down' }}">{{ '%+.0f'|format(p) }}%</span>{% else %}-{% endif %}</td>
+        <td class="num">{{ fmt(k.started_yesterday) }}</td><td class="num">{{ fmt(k.started_avg_7d) }}</td></tr>
+      {% endfor %}
+    </table></div>
+
+    {% if c.competitors %}
+    <h3>등록 경쟁사</h3>
+    <div class="tw"><table class="t">
+      <tr><th>브랜드</th><th class="num">게재 중(포착)</th><th class="num">오늘 신규</th>
+          <th class="num">아카이브 신규</th><th class="num">계정 수</th><th></th></tr>
+      {% for b in c.competitors %}
+      <tr><td><b>{{ b.brand }}</b></td><td class="num">{{ b.active_ads }}</td>
+        <td class="num">{{ b.new_ads }}</td><td class="num">{{ b.archived_new }}</td>
+        <td class="num">{{ b.pages }}</td>
+        <td><a href="{{ url_for('index', brand=b.brand) }}">아카이브 보기</a></td></tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+
+    {% if c.top %}
+    <h3>오늘 광고를 많이 낸 곳 (랜딩 기준)</h3>
+    <div class="tw"><table class="t">
+      <tr><th>브랜드/랜딩</th><th class="num">신규</th><th>계정명(위장 포함)</th><th></th></tr>
+      {% for t in c.top %}
+      <tr><td>{% if t.known %}<b>{{ t.who }}</b> ★{% else %}{{ t.who }}{% endif %}</td>
+        <td class="num">{{ t.new_ads }}</td><td>{{ t.pages|join(', ') }}</td>
+        <td><a target="_blank" rel="noopener" href="{{ t.library }}">라이브러리</a></td></tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+
+    {% if c.new_landings %}
+    <h3>처음 포착한 랜딩 — 신규 브랜드 후보</h3>
+    <div class="tw"><table class="t">
+      <tr><th>랜딩</th><th class="num">광고</th><th>첫 게재</th><th>계정명</th><th>문구</th><th></th></tr>
+      {% for b in c.new_landings %}
+      <tr><td>{{ b.landing }}</td><td class="num">{{ b.ads }}</td><td>{{ b.first_start }}</td>
+        <td>{{ b.pages[:3]|join(', ') }}</td><td class="stat">{{ b.sample[:70] }}</td>
+        <td><a href="{{ url_for('scout_view', landing=b.landing) }}">광고 보기</a></td></tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+
+    {% if c.words %}
+    <h3>신규 광고에 많이 쓴 표현 <span class="stat">↑ = 지난 4주보다 급증</span></h3>
+    <div class="chips">{% for w in c.words %}
+      <span class="tag {{ 'new' if w.rising else '' }}">{{ w.word }} {{ w.ads }}{{ ' ↑' if w.rising else '' }}</span>
+    {% endfor %}</div>
+    {% endif %}
+
+    {% if c.samples %}
+    <h3>신규 광고 예시 <a class="stat" href="{{ url_for('scout_view', category=c.name, fresh=1) }}">전체 보기 →</a></h3>
+    <div class="grid">{% for a in c.samples %}
+      <div class="card">
+        <a class="thumb" target="_blank" rel="noopener" href="{{ a.library }}">
+          {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</a>
+        <div class="body"><span class="brand">{{ a.who }}</span>
+          <span class="stat">{{ a.page_name }} · {{ a.start_date }}</span>
+          <div class="copy">{{ a.text }}</div></div>
+      </div>
+    {% endfor %}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  <p class="stat">생성 {{ rep.generated_at }}</p>
+{% endif %}
+</main>
+"""
+
+
+def _fmt(n):
+    return "-" if n is None else "{:,}".format(int(round(n)))
+
+
+@app.route("/report")
+def report():
+    dates = sorted((p.stem for p in db.REPORT_DIR.glob("????-??-??.json")), reverse=True)
+    rep = scout.load_report(request.args.get("date") or None)
+    return render_template_string(REPORT_PAGE, nav=nav("report"), rep=rep, dates=dates,
+                                  fmt=_fmt, page_link=scout.page_link)
+
+
+SCOUT_PAGE = HEAD + EXTRA_CSS + r"""
+<header>
+  <h1>카테고리 정찰</h1>
+  {{ nav|safe }}
+  <span class="stat">조건 <b>{{ total }}</b>건</span>
+</header>
+<main>
+  <form class="filters" method="get">
+    <select name="category"><option value="">전체 카테고리</option>
+      {% for c in categories %}<option {% if c==f.category %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+    <select name="who"><option value="">전체 광고주</option>
+      <option value="_known" {% if f.who=='_known' %}selected{% endif %}>등록 경쟁사만</option>
+      <option value="_unknown" {% if f.who=='_unknown' %}selected{% endif %}>미등록만</option>
+      {% for b in brand_names %}<option {% if b==f.who %}selected{% endif %}>{{ b }}</option>{% endfor %}</select>
+    <input type="text" name="landing" value="{{ f.landing }}" placeholder="랜딩 도메인">
+    <input type="text" name="q" value="{{ f.q }}" placeholder="문구·계정명 검색">
+    <label class="stat"><input type="checkbox" name="fresh" value="1" {% if f.fresh %}checked{% endif %}> 오늘 처음 본 것만</label>
+    <button>적용</button>
+    <a class="tag" href="{{ url_for('scout_view') }}">초기화</a>
+  </form>
+  <datalist id="brandlist">{% for b in brand_names %}<option value="{{ b }}">{% endfor %}</datalist>
+  {% if ads %}
+  <div class="grid">{% for a in ads %}
+    <div class="card">
+      <a class="thumb" target="_blank" rel="noopener" href="https://www.facebook.com/ads/library/?id={{ a.ad_archive_id }}">
+        {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</a>
+      <div class="body">
+        <div class="row"><span class="brand">{{ a.brand or a.landing or '-' }}</span>
+          {% if a.brand %}<span class="tag on">등록</span>{% endif %}
+          <span class="tag">{{ a.media_type }}</span></div>
+        <span class="stat">{{ a.page_name }} · {{ a.start_date }}</span>
+        {% if a.title %}<div style="font-weight:600;font-size:13px">{{ a.title }}</div>{% endif %}
+        <div class="copy">{{ a.body or '' }}</div>
+        <div class="meta">
+          <a target="_blank" rel="noopener" href="{{ page_link(a.page_id) }}">이 계정 광고 전체</a>
+          {% if a.link_url %} · <a target="_blank" rel="noopener" href="{{ a.link_url }}">랜딩</a>{% endif %}
+          {% if a.brand != '(우리)' %}
+          <form method="post" action="{{ url_for('brand_attach') }}" class="inline" style="margin-top:6px">
+            <input type="hidden" name="page_id" value="{{ a.page_id }}">
+            <input type="hidden" name="page_name" value="{{ a.page_name }}">
+            <input type="hidden" name="landing" value="{{ a.landing or '' }}">
+            <input type="hidden" name="category" value="{{ a.category }}">
+            <input type="hidden" name="back" value="{{ request.full_path }}">
+            <input type="text" name="brand" list="brandlist" value="{{ a.brand or '' }}"
+                   placeholder="브랜드명" style="min-width:0;width:110px" required>
+            <button class="ghost" title="이 계정(과 랜딩 도메인)을 경쟁사로 등록하고 소재까지 아카이브">아카이브</button>
+          </form>{% endif %}
+        </div>
+      </div>
+    </div>{% endfor %}</div>
+  <div class="pager">
+    {% if page > 1 %}<a class="tag" href="?{{ qs }}&page={{ page-1 }}">← 이전</a>{% endif %}
+    <span class="stat">{{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a class="tag" href="?{{ qs }}&page={{ page+1 }}">다음 →</a>{% endif %}
+  </div>
+  {% else %}<div class="empty">조건에 맞는 광고가 없습니다.</div>{% endif %}
+</main>
+"""
+
+
+@app.route("/scout")
+def scout_view():
+    f = {k: request.args.get(k, "") for k in ("category", "who", "landing", "q", "fresh")}
+    sql, args = [], []
+    if f["category"]:
+        sql.append("category=?"); args.append(f["category"])
+    if f["who"] == "_known":
+        sql.append("IFNULL(brand,'') NOT IN ('', '(우리)')")
+    elif f["who"] == "_unknown":
+        sql.append("IFNULL(brand,'')=''")
+    elif f["who"]:
+        sql.append("brand=?"); args.append(f["who"])
+    if f["landing"]:
+        sql.append("landing LIKE ?"); args.append("%" + f["landing"] + "%")
+    if f["q"]:
+        like = "%" + f["q"] + "%"
+        sql.append("(body LIKE ? OR title LIKE ? OR page_name LIKE ?)"); args += [like] * 3
+    if f["fresh"]:
+        sql.append("substr(first_seen,1,10)=date('now','localtime')")
+    where = (" WHERE " + " AND ".join(sql)) if sql else ""
+    page = max(1, int(request.args.get("page", 1)))
+    con = db.connect()
+    total = con.execute("SELECT COUNT(*) c FROM scout_ads" + where, args).fetchone()["c"]
+    ads = [dict(r) for r in con.execute(
+        "SELECT * FROM scout_ads" + where + " ORDER BY start_date DESC, first_seen DESC "
+        "LIMIT ? OFFSET ?", args + [PER_PAGE, (page - 1) * PER_PAGE])]
+    brand_names = [r["name"] for r in con.execute("SELECT name FROM brands ORDER BY name")]
+    con.close()
+    categories = [c["name"] for c in scout.load_config()["categories"]]
+    qs = "&".join("%s=%s" % (k, v) for k, v in f.items() if v)
+    return render_template_string(
+        SCOUT_PAGE, nav=nav("scout_view"), ads=ads, f=f, total=total, qs=qs, page=page,
+        pages=max(1, -(-total // PER_PAGE)), brand_names=brand_names,
+        categories=categories, page_link=scout.page_link)
+
+
+@app.route("/brand/attach", methods=["POST"])
+def brand_attach():
+    """정찰 카드의 '아카이브' 버튼: 계정(+랜딩 도메인)을 브랜드에 묶고 아카이브 대상으로."""
+    fm = request.form
+    name = (fm.get("brand") or "").strip()
+    if name and name != "(우리)":
+        con = db.connect()
+        scout.add_brand(con, name, fm.get("category") or None,
+                        pages=[fm.get("page_id")] if fm.get("page_id") else [],
+                        domains=[fm.get("landing")] if fm.get("landing") else [],
+                        source="web")
+        con.execute("UPDATE brand_keys SET label=COALESCE(label, ?) WHERE kind='page' "
+                    "AND value=?", (fm.get("page_name"), fm.get("page_id")))
+        con.execute("UPDATE scout_ads SET brand=? WHERE page_id=? OR "
+                    "(landing<>'' AND landing=?)", (name, fm.get("page_id"), fm.get("landing")))
+        con.commit()
+        con.close()
+    back = fm.get("back") or url_for("scout_view")
+    return redirect(back if back.startswith("/") else url_for("scout_view"))
+
+
+BRANDS_PAGE = HEAD + EXTRA_CSS + r"""
+<header>
+  <h1>경쟁사 레지스트리</h1>
+  {{ nav|safe }}
+</header>
+<main>
+  <div class="sec"><h2>경쟁사 추가</h2>
+    <form method="post" action="{{ url_for('brand_add') }}" class="inline">
+      <input type="text" name="name" placeholder="브랜드명" required>
+      <select name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select>
+      <input type="text" name="page" placeholder="메타 페이지 ID">
+      <input type="text" name="domain" placeholder="랜딩 도메인 (예: alpha-i.kr)">
+      <input type="text" name="term" placeholder="정확히 일치 검색어">
+      <button>추가</button>
+    </form>
+    <p class="stat" style="margin:8px 0 0">페이지 ID는 광고 라이브러리 주소의 <code>view_all_page_id=</code> 뒤 숫자.
+    계정명은 위장하므로 <b>랜딩 도메인</b>을 넣어 두면 새 위장 계정이 자동으로 묶입니다.</p>
+  </div>
+  {% for b in brands %}
+  <div class="sec">
+    <h2>{{ b.name }} <span class="stat">{{ b.category or '' }} · 아카이브 {{ b.archived }}건</span>
+      <form method="post" action="{{ url_for('brand_toggle') }}" class="inline" style="float:right">
+        <input type="hidden" name="name" value="{{ b.name }}">
+        <button class="{{ '' if b.archive else 'ghost' }}" name="archive" value="{{ 0 if b.archive else 1 }}">
+          {{ '아카이브 중 (끄기)' if b.archive else '아카이브 꺼짐 (켜기)' }}</button></form></h2>
+    {% if b.note %}<p class="stat" style="margin:0 0 8px">{{ b.note }}</p>{% endif %}
+    <div class="tw"><table class="t">
+      <tr><th>종류</th><th>값</th><th>이름</th><th>출처</th><th>등록</th><th>마지막 수집</th></tr>
+      {% for k in keys[b.name] %}
+      <tr><td>{{ {'page':'계정','domain':'도메인','term':'검색어'}[k.kind] }}</td>
+        <td>{% if k.kind=='page' %}<a target="_blank" rel="noopener" href="{{ page_link(k.value) }}">{{ k.value }}</a>{% else %}{{ k.value }}{% endif %}</td>
+        <td>{{ k.label or '' }}</td>
+        <td>{% if k.source=='auto' %}<span class="tag new">자동 발견</span>{% else %}{{ k.source }}{% endif %}</td>
+        <td class="stat">{{ (k.added_at or '')[:10] }}</td><td class="stat">{{ (k.last_run or '')[:16] }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% if b.google_advertiser %}<p class="stat" style="margin:8px 0 0">구글:
+      <a target="_blank" rel="noopener" href="https://adstransparency.google.com/advertiser/{{ b.google_advertiser }}?region=KR">광고 투명성 센터</a></p>{% endif %}
+  </div>
+  {% else %}<div class="empty">등록된 경쟁사가 없습니다.</div>{% endfor %}
+</main>
+"""
+
+
+@app.route("/brands")
+def brands_view():
+    con = db.connect()
+    brands = scout.brand_rows(con)
+    keys = {b["name"]: [dict(r) for r in con.execute(
+        "SELECT * FROM brand_keys WHERE brand=? ORDER BY kind, added_at", (b["name"],))]
+        for b in brands}
+    con.close()
+    categories = [c["name"] for c in scout.load_config()["categories"]]
+    return render_template_string(BRANDS_PAGE, nav=nav("brands_view"), brands=brands,
+                                  keys=keys, categories=categories,
+                                  page_link=scout.page_link)
+
+
+@app.route("/brands/add", methods=["POST"])
+def brand_add():
+    fm = request.form
+    name = (fm.get("name") or "").strip()
+    if name:
+        con = db.connect()
+        one = lambda k: [fm.get(k).strip()] if (fm.get(k) or "").strip() else []
+        scout.add_brand(con, name, fm.get("category") or None, one("page"),
+                        one("domain"), one("term"), source="web")
+        con.close()
+    return redirect(url_for("brands_view"))
+
+
+@app.route("/brands/toggle", methods=["POST"])
+def brand_toggle():
+    con = db.connect()
+    con.execute("UPDATE brands SET archive=? WHERE name=?",
+                (int(request.form.get("archive") or 0), request.form.get("name")))
+    con.commit()
+    con.close()
+    return redirect(url_for("brands_view"))
 
 
 if __name__ == "__main__":
