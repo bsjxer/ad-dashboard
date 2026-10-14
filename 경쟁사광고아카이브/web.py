@@ -198,8 +198,7 @@ PAGE = r"""
         <div class="meta">
           {{ a.start_date or '?' }} ~ {{ a.end_date or '진행' }}
           {% if a.platforms %} · {{ a.platforms }}{% endif %}<br>
-          <a href="https://www.facebook.com/ads/library/?id={{ a.ad_archive_id }}"
-             target="_blank" rel="noopener">라이브러리 원본</a>
+          <a href="#" onclick="openAd('{{ a.ad_archive_id }}');return false">자세히</a>
           {% if a.link_url %} · <a href="{{ a.link_url }}" target="_blank" rel="noopener">랜딩</a>{% endif %}
         </div>
       </div>
@@ -363,10 +362,20 @@ def api_ad(ad_id):
     con = db.connect()
     row = con.execute("SELECT * FROM ads WHERE ad_archive_id=?", (ad_id,)).fetchone()
     if not row:
+        # 아카이브(소재 저장) 대상이 아닌 정찰 광고 — 텍스트와 썸네일만 있다
+        srow = con.execute("SELECT * FROM scout_ads WHERE ad_archive_id=?", (ad_id,)).fetchone()
         con.close()
-        return jsonify({"error": "not found"}), 404
+        if not srow:
+            return jsonify({"error": "not found"}), 404
+        d = dict(srow)
+        d["keyword"] = d.pop("keywords", "")
+        d["media"] = ([{"kind": "image", "url": d["thumb_url"], "local_path": None}]
+                      if d.get("thumb_url") else [])
+        d["archived"] = False
+        return jsonify(d)
     d = dict(row)
     d.pop("raw", None)
+    d["archived"] = True
     d["media"] = [
         {"kind": m["kind"], "url": m["url"],
          "local_path": (m["local_path"] if m["local_path"] not in (None, "", "FAILED") else None)}
@@ -432,6 +441,7 @@ def run_collect():
 # ================================================================ 정찰·리포트·경쟁사
 # 기존 아카이브 화면의 <style>을 그대로 쓴다.
 HEAD = PAGE[:PAGE.index("<header>")]
+DIALOG = PAGE[PAGE.index('<dialog id="dlg">'):]
 
 NAV_ITEMS = [("report", "리포트"), ("scout_view", "정찰"),
              ("brands_view", "경쟁사"), ("index", "아카이브")]
@@ -486,7 +496,7 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
   <div class="sec"><h2>★ 오늘 자동 발견</h2>
     <table class="t">{% for k in rep.discovered %}
       <tr><td>{{ k.brand }}</td><td>{{ '새 계정' if k.kind=='page' else '새 도메인' }}</td>
-      <td>{% if k.kind=='page' %}<a target="_blank" rel="noopener" href="{{ page_link(k.value) }}">{{ k.label or k.value }}</a>{% else %}{{ k.value }}{% endif %}</td></tr>
+      <td>{% if k.kind=='page' %}<a href="{{ url_for('scout_view', page=k.value) }}">{{ k.label or k.value }}</a>{% else %}{{ k.value }}{% endif %}</td></tr>
     {% endfor %}</table></div>
   {% endif %}
 
@@ -529,7 +539,7 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
       {% for t in c.top %}
       <tr><td>{% if t.known %}<b>{{ t.who }}</b> ★{% else %}{{ t.who }}{% endif %}</td>
         <td class="num">{{ t.new_ads }}</td><td>{{ t.pages|join(', ') }}</td>
-        <td><a target="_blank" rel="noopener" href="{{ t.library }}">라이브러리</a></td></tr>
+        <td>{% if t.known %}<a href="{{ url_for('index', brand=t.who) }}">광고 보기</a>{% elif t.landing %}<a href="{{ url_for('scout_view', landing=t.landing) }}">광고 보기</a>{% else %}<a href="{{ url_for('scout_view', q=t.pages[0]) }}">광고 보기</a>{% endif %}</td></tr>
       {% endfor %}
     </table></div>
     {% endif %}
@@ -557,8 +567,8 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
     <h3>신규 광고 예시 <a class="stat" href="{{ url_for('scout_view', category=c.name, fresh=1) }}">전체 보기 →</a></h3>
     <div class="grid">{% for a in c.samples %}
       <div class="card">
-        <a class="thumb" target="_blank" rel="noopener" href="{{ a.library }}">
-          {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</a>
+        <div class="thumb" onclick="openAd('{{ a.id or a.library.split('id=')[-1] }}')">
+          {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</div>
         <div class="body"><span class="brand">{{ a.who }}</span>
           <span class="stat">{{ a.page_name }} · {{ a.start_date }}</span>
           <div class="copy">{{ a.text }}</div></div>
@@ -570,7 +580,7 @@ REPORT_PAGE = HEAD + EXTRA_CSS + r"""
   <p class="stat">생성 {{ rep.generated_at }}</p>
 {% endif %}
 </main>
-"""
+""" + DIALOG
 
 
 def _fmt(n):
@@ -609,8 +619,8 @@ SCOUT_PAGE = HEAD + EXTRA_CSS + r"""
   {% if ads %}
   <div class="grid">{% for a in ads %}
     <div class="card">
-      <a class="thumb" target="_blank" rel="noopener" href="https://www.facebook.com/ads/library/?id={{ a.ad_archive_id }}">
-        {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</a>
+      <div class="thumb" onclick="openAd('{{ a.ad_archive_id }}')">
+        {% if a.thumb_url %}<img loading="lazy" src="{{ a.thumb_url }}" alt="">{% else %}<span class="none">{{ a.media_type }}</span>{% endif %}</div>
       <div class="body">
         <div class="row"><span class="brand">{{ a.brand or a.landing or '-' }}</span>
           {% if a.brand %}<span class="tag on">등록</span>{% endif %}
@@ -619,7 +629,7 @@ SCOUT_PAGE = HEAD + EXTRA_CSS + r"""
         {% if a.title %}<div style="font-weight:600;font-size:13px">{{ a.title }}</div>{% endif %}
         <div class="copy">{{ a.body or '' }}</div>
         <div class="meta">
-          <a target="_blank" rel="noopener" href="{{ page_link(a.page_id) }}">이 계정 광고 전체</a>
+          <a href="{{ url_for('scout_view', page=a.page_id) }}">이 계정 광고 전체</a>
           {% if a.link_url %} · <a target="_blank" rel="noopener" href="{{ a.link_url }}">랜딩</a>{% endif %}
           {% if a.brand != '(우리)' %}
           <form method="post" action="{{ url_for('brand_attach') }}" class="inline" style="margin-top:6px">
@@ -636,18 +646,18 @@ SCOUT_PAGE = HEAD + EXTRA_CSS + r"""
       </div>
     </div>{% endfor %}</div>
   <div class="pager">
-    {% if page > 1 %}<a class="tag" href="?{{ qs }}&page={{ page-1 }}">← 이전</a>{% endif %}
+    {% if page > 1 %}<a class="tag" href="?{{ qs }}&p={{ page-1 }}">← 이전</a>{% endif %}
     <span class="stat">{{ page }} / {{ pages }}</span>
-    {% if page < pages %}<a class="tag" href="?{{ qs }}&page={{ page+1 }}">다음 →</a>{% endif %}
+    {% if page < pages %}<a class="tag" href="?{{ qs }}&p={{ page+1 }}">다음 →</a>{% endif %}
   </div>
   {% else %}<div class="empty">조건에 맞는 광고가 없습니다.</div>{% endif %}
 </main>
-"""
+""" + DIALOG
 
 
 @app.route("/scout")
 def scout_view():
-    f = {k: request.args.get(k, "") for k in ("category", "who", "landing", "q", "fresh")}
+    f = {k: request.args.get(k, "") for k in ("category", "who", "landing", "q", "fresh", "page")}
     sql, args = [], []
     if f["category"]:
         sql.append("category=?"); args.append(f["category"])
@@ -659,13 +669,15 @@ def scout_view():
         sql.append("brand=?"); args.append(f["who"])
     if f["landing"]:
         sql.append("landing LIKE ?"); args.append("%" + f["landing"] + "%")
+    if f["page"]:
+        sql.append("page_id=?"); args.append(f["page"])
     if f["q"]:
         like = "%" + f["q"] + "%"
         sql.append("(body LIKE ? OR title LIKE ? OR page_name LIKE ?)"); args += [like] * 3
     if f["fresh"]:
         sql.append("substr(first_seen,1,10)=date('now','localtime')")
     where = (" WHERE " + " AND ".join(sql)) if sql else ""
-    page = max(1, int(request.args.get("page", 1)))
+    page = max(1, int(request.args.get("p", 1)))
     con = db.connect()
     total = con.execute("SELECT COUNT(*) c FROM scout_ads" + where, args).fetchone()["c"]
     ads = [dict(r) for r in con.execute(
@@ -732,7 +744,7 @@ BRANDS_PAGE = HEAD + EXTRA_CSS + r"""
       <tr><th>종류</th><th>값</th><th>이름</th><th>출처</th><th>등록</th><th>마지막 수집</th></tr>
       {% for k in keys[b.name] %}
       <tr><td>{{ {'page':'계정','domain':'도메인','term':'검색어'}[k.kind] }}</td>
-        <td>{% if k.kind=='page' %}<a target="_blank" rel="noopener" href="{{ page_link(k.value) }}">{{ k.value }}</a>{% else %}{{ k.value }}{% endif %}</td>
+        <td>{% if k.kind=='page' %}<a href="{{ url_for('scout_view', page=k.value) }}">{{ k.value }}</a>{% else %}{{ k.value }}{% endif %}</td>
         <td>{{ k.label or '' }}</td>
         <td>{% if k.source=='auto' %}<span class="tag new">자동 발견</span>{% else %}{{ k.source }}{% endif %}</td>
         <td class="stat">{{ (k.added_at or '')[:10] }}</td><td class="stat">{{ (k.last_run or '')[:16] }}</td></tr>

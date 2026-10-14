@@ -191,6 +191,9 @@ class Registry:
         self.own_domains = set(own.get("domains", []))
         self.own_names = own.get("page_names", [])
         self.events = []   # 이번 실행에서 자동 발견한 것
+        # 공용 스토어(LG 생활건강몰 등)를 쓰는 브랜드는 도메인을 배우면 다른 제품까지 묶인다
+        self.no_learn = {b["name"] for b in cfg.get("brands", [])
+                         if b.get("learn_domains") is False}
 
     def reload(self):
         self.archive_brands = {r["name"] for r in self.con.execute(
@@ -217,6 +220,7 @@ class Registry:
                 self.page_src[page_id] = "auto"
                 self.events.append(("새 계정", b_dom, "%s (%s)" % (page_name, page_id)))
         if (b_page and landing and not b_dom and landing not in self.own_domains
+                and b_page not in self.no_learn
                 and self.page_src.get(page_id) != "auto"):
             # 직접 등록한 계정이 처음 보는 도메인으로 나감 → 그 브랜드의 도메인
             # (자동 발견 계정에서는 배우지 않는다 — 잘못 묶이면 연쇄로 번진다)
@@ -339,8 +343,9 @@ def _search(page, url_of, label, keyword):
 PAUSE = 3.0
 
 
-def run_scout():
-    """카테고리 키워드 → 게재 중 광고 수 + 상위 광고. 브랜드 terms·계정 → 경쟁사 광고."""
+def run_scout(brands_only=False):
+    """카테고리 키워드 → 게재 중 광고 수 + 상위 광고. 브랜드 terms·계정 → 경쟁사 광고.
+    brands_only: 경쟁사를 막 추가했을 때 카테고리 훑기 없이 경쟁사만 바로 받는다."""
     cfg = load_config()
     country = cfg.get("country", "KR")
     con = db.connect()
@@ -364,7 +369,7 @@ def run_scout():
         return n
 
     try:
-        for cat in cfg["categories"]:
+        for cat in ([] if brands_only else cfg["categories"]):
             cname = cat["name"]
             for kw in cat["keywords"]:
                 n = step("%s/%s" % (cname, kw),
@@ -592,7 +597,8 @@ def build_report(date=None):
             if len(words) >= 15:
                 break
 
-        samples = [{"who": a["brand"] or a["landing"] or a["page_name"],
+        samples = [{"id": a["ad_archive_id"],
+                    "who": a["brand"] or a["landing"] or a["page_name"],
                     "page_name": a["page_name"], "start_date": a["start_date"],
                     "media_type": a["media_type"],
                     "text": _clean((a["title"] or "") + " " + (a["body"] or ""), 160),
@@ -698,7 +704,8 @@ def main():
     p = argparse.ArgumentParser(description="경쟁사 광고 정찰 작업자")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daily")
-    sub.add_parser("scout")
+    sub.add_parser("scout").add_argument("--brands-only", action="store_true",
+                                         help="경쟁사 계정·검색어만 (카테고리 훑기 생략)")
     sub.add_parser("archive")
     for name in ("report", "print"):
         sub.add_parser(name).add_argument("--date")
@@ -722,7 +729,7 @@ def main():
         run_archive()
         print(format_report(build_report()))
     elif a.cmd == "scout":
-        run_scout()
+        run_scout(brands_only=a.brands_only)
     elif a.cmd == "archive":
         run_archive()
     elif a.cmd == "report":
