@@ -75,7 +75,7 @@ PC 체크아웃에서 직접 고치면 다음 pull에서 충돌하거나 조용�
 `경쟁사광고아카이브/`는 이제 **서버 cron이 매일 07:30 KST에 돌린다**(로그인 없이도 됨).
 배포·경로는 `경쟁사광고아카이브/deploy/README.md`.
 
-- 대시보드 `https://64.176.226.7:8444/report` (예산 대시보드와 같은 비밀번호, 사무실 IP만)
+- 대시보드 `https://64.176.226.7:8444/report` (비밀번호 없음 — 방화벽이 사무실 IP만 허용. 공개 광고 정보라 사용자 요청으로 해제, 2026-10-14)
 - 수집물 `/srv/data/adarchive` (저장소 밖) · 로그 `/var/log/adarchive-daily.log`
 - **사용자가 "오늘 리포트"라고 하면**: 서버에서
   `ADARCHIVE_DATA=/srv/data/adarchive /opt/adarchive/venv/bin/python scout.py print`
