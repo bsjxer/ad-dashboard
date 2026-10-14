@@ -322,6 +322,31 @@ def _store(con, sink, category, keyword, land, reg):
     return new
 
 
+def _suspects(con, sink, brand, term, reg):
+    """브랜드 검색어에 걸린 광고 중, 그 브랜드로 식별되지 않은 계정을 '위장 의심'으로 남긴다."""
+    ts = db.now()
+    by_page = collections.defaultdict(list)
+    for ad in sink.values():
+        pid = ad.get("page_id")
+        if not pid or reg.page.get(pid):
+            continue          # 이미 어떤 브랜드 계정으로 등록됨
+        row = con.execute("SELECT brand, landing FROM scout_ads WHERE ad_archive_id=?",
+                          (ad["ad_archive_id"],)).fetchone()
+        if row and row["brand"]:
+            continue          # 랜딩으로 식별됨(자동 등록됐거나 우리/다른 브랜드)
+        by_page[pid].append((ad, row["landing"] if row else None))
+    for pid, items in by_page.items():
+        ad, landing = items[0]
+        con.execute(
+            "INSERT INTO suspects (brand, page_id, page_name, term, landing, ad_id, n_ads, "
+            "first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(brand, page_id) DO UPDATE SET last_seen=excluded.last_seen, "
+            "n_ads=MAX(suspects.n_ads, excluded.n_ads), page_name=excluded.page_name",
+            (brand, pid, ad.get("page_name"), term, landing, ad["ad_archive_id"],
+             len(items), ts, ts))
+    con.commit()
+
+
 def _save_count(con, kind, ref_date, category, keyword, n):
     if n is None:
         return
@@ -355,7 +380,7 @@ def run_scout(brands_only=False):
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     t0, total_new = time.time(), 0
 
-    def step(label, url_of, category, keyword):
+    def step(label, url_of, category, keyword, term_brand=None):
         nonlocal total_new
         try:
             sink, n = _search(page, url_of, category, keyword)
@@ -363,6 +388,8 @@ def run_scout(brands_only=False):
             print("  [%s] 실패 %s: %s" % (label, type(e).__name__, e), flush=True)
             return None
         new = _store(con, sink, category, keyword, land, reg)
+        if term_brand:
+            _suspects(con, sink, term_brand, keyword[5:], reg)
         total_new += new
         print("  [%s] 게재중 %s · 수집 %d (처음 %d)" % (label, n, len(sink), new), flush=True)
         time.sleep(PAUSE)
@@ -386,7 +413,7 @@ def run_scout(brands_only=False):
             if r["kind"] == "term":
                 step("%s \"%s\"" % (r["brand"], r["value"]),
                      lambda mt, t=r["value"]: exact_url(t, country, media_type=mt),
-                     r["category"], "term:" + r["value"])
+                     r["category"], "term:" + r["value"], term_brand=r["brand"])
             else:
                 step("%s 계정 %s" % (r["brand"], r["value"]),
                      lambda mt, pid=r["value"]: collect.library_url(
@@ -619,9 +646,11 @@ def build_report(date=None):
 
     first_day = con.execute(
         "SELECT MIN(substr(first_seen,1,10)) d FROM scout_ads").fetchone()["d"]
+    suspects = [dict(r) for r in con.execute(
+        "SELECT * FROM suspects WHERE status='new' ORDER BY brand, n_ads DESC")]
     con.close()
     rep = {"date": date, "generated_at": db.now(), "categories": cats,
-           "discovered": auto_today,
+           "discovered": auto_today, "suspects": suspects,
            # 정찰 첫날엔 모든 랜딩을 '처음 봄'으로 잡는다 — 7일 쌓여야 의미가 있다
            "baseline_days": ((datetime.strptime(date, "%Y-%m-%d")
                               - datetime.strptime(first_day, "%Y-%m-%d")).days
@@ -663,6 +692,11 @@ def format_report(rep):
         L.append("\n★ 오늘 자동 발견")
         for k in rep["discovered"]:
             L.append("  - %s: %s %s %s" % (k["brand"], k["kind"], k["value"], k["label"] or ""))
+    if rep.get("suspects"):
+        L.append("\n? 위장 의심 계정 (확인 필요)")
+        for s in rep["suspects"]:
+            L.append("  - %s ← \"%s\" 검색: %s (광고 %d, 랜딩 %s)"
+                     % (s["brand"], s["term"], s["page_name"], s["n_ads"], s["landing"] or "?"))
     for c in rep["categories"]:
         L.append("\n## %s%s" % (c["name"], " (우리: %s)" % c["ours"] if c.get("ours") else ""))
         L.append("키워드 | 게재중 | 어제 시작(포착) | 7일 일평균(포착)")
@@ -728,6 +762,13 @@ def main():
     ba.add_argument("--note")
     for name in ("off", "on"):
         bsub.add_parser(name).add_argument("name")
+    xp = sub.add_parser("suspect", help="위장 의심 계정 확인")
+    xsub = xp.add_subparsers(dest="xcmd", required=True)
+    xsub.add_parser("list")
+    for name in ("yes", "no"):
+        x = xsub.add_parser(name)
+        x.add_argument("brand")
+        x.add_argument("page_id")
     a = p.parse_args()
 
     if a.cmd == "daily":
@@ -744,6 +785,23 @@ def main():
     elif a.cmd == "print":
         rep = load_report(a.date)
         print(format_report(rep) if rep else "리포트 없음")
+    elif a.cmd == "suspect":
+        con = db.connect()
+        if a.xcmd == "list":
+            for s in con.execute("SELECT * FROM suspects WHERE status='new' ORDER BY brand"):
+                print("%s\t%s\t%s\t\"%s\"\t광고 %d\t랜딩 %s"
+                      % (s["brand"], s["page_id"], s["page_name"], s["term"], s["n_ads"],
+                         s["landing"] or "-"))
+        else:
+            st = "confirmed" if a.xcmd == "yes" else "rejected"
+            con.execute("UPDATE suspects SET status=? WHERE brand=? AND page_id=?",
+                        (st, a.brand, a.page_id))
+            if st == "confirmed":
+                add_brand(con, a.brand, pages=[a.page_id], source="chat")
+                con.execute("UPDATE scout_ads SET brand=? WHERE page_id=?", (a.brand, a.page_id))
+            con.commit()
+            print("%s %s: %s" % (a.brand, a.page_id, st))
+        con.close()
     elif a.cmd == "brand":
         con = db.connect()
         if a.bcmd == "list":

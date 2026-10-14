@@ -786,6 +786,26 @@ BRANDS_PAGE = HEAD + EXTRA_CSS + BRANDS_CSS + r"""
   {{ nav|safe }}
 </header>
 <main>
+  {% if suspects %}
+  <div class="sec" style="border-color:#f59e0b">
+    <h2>위장 의심 계정 {{ suspects|length }}곳 <span class="stat">경쟁사 브랜드·제품명 검색에 걸렸지만 랜딩이 달라 자동 등록하지 않은 계정</span></h2>
+    <div class="tw"><table class="t">
+      <tr><th>브랜드</th><th>계정명</th><th>검색어</th><th>랜딩</th><th class="num">광고</th><th>광고 예시</th><th></th></tr>
+      {% for x in suspects %}
+      <tr><td><b>{{ x.brand }}</b></td><td>{{ x.page_name }}</td><td>"{{ x.term }}"</td>
+        <td>{{ x.landing or '-' }}</td><td class="num">{{ x.n_ads }}</td>
+        <td class="stat" style="max-width:320px">{% if x.thumb %}<img src="{{ x.thumb }}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:6px">{% endif %}
+          <a href="#" onclick="openAd('{{ x.ad_id }}');return false">{{ x.text[:60] }}</a></td>
+        <td style="white-space:nowrap">
+          <form method="post" action="{{ url_for('suspect_set') }}" class="inline">
+            <input type="hidden" name="brand" value="{{ x.brand }}"><input type="hidden" name="page_id" value="{{ x.page_id }}">
+            <button name="status" value="confirmed" title="이 브랜드의 위장 계정으로 등록 — 매일 훑고 소재까지 저장">맞음</button>
+            <button class="ghost" name="status" value="rejected" title="다음부터 안 띄움">아님</button>
+          </form></td></tr>
+      {% endfor %}
+    </table></div>
+  </div>
+  {% endif %}
   <div class="tiles">
     {% for b in tiles %}
     <a class="tile {{ 'on' if sel and sel.name == b.name else '' }}" href="{{ url_for('brands_view', brand=b.name) }}">
@@ -974,11 +994,38 @@ def brands_view():
                 a["landing"] = scout._host(a["link_url"]) if a["link_url"] else None
                 a["is_new"] = (a["first_seen"] or "") >= (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
             ads = rows
+    suspects = [dict(r) for r in con.execute(
+        "SELECT x.*, s.thumb_url, s.title, s.body FROM suspects x LEFT JOIN scout_ads s "
+        "ON s.ad_archive_id=x.ad_id WHERE x.status='new' ORDER BY x.brand, x.n_ads DESC")]
+    for x in suspects:
+        x["thumb"] = x["thumb_url"]
+        x["text"] = scout._clean((x["title"] or "") + " " + (x["body"] or ""))
     con.close()
     categories = [c["name"] for c in scout.load_config()["categories"]]
     return render_template_string(BRANDS_PAGE, nav=nav("brands_view"), brands=brands, keys=keys,
                                   categories=categories, tiles=tiles, sel=sel, ads=ads,
-                                  counts=counts, status=status, media=media, sort=sort)
+                                  counts=counts, status=status, media=media, sort=sort,
+                                  suspects=suspects)
+
+
+@app.route("/suspects/set", methods=["POST"])
+def suspect_set():
+    """위장 의심 계정 확인. '맞음'이면 브랜드 계정으로 등록 → 다음 실행부터 매일 훑고 소재 저장."""
+    brand, pid, st = (request.form.get("brand"), request.form.get("page_id"),
+                      request.form.get("status"))
+    con = db.connect()
+    if st in ("confirmed", "rejected"):
+        con.execute("UPDATE suspects SET status=? WHERE brand=? AND page_id=?", (st, brand, pid))
+        if st == "confirmed":
+            name = con.execute("SELECT page_name FROM suspects WHERE brand=? AND page_id=?",
+                               (brand, pid)).fetchone()
+            scout.add_brand(con, brand, pages=[pid], source="web")
+            con.execute("UPDATE brand_keys SET label=? WHERE kind='page' AND value=?",
+                        (name["page_name"] if name else None, pid))
+            con.execute("UPDATE scout_ads SET brand=? WHERE page_id=?", (brand, pid))
+        con.commit()
+    con.close()
+    return redirect(url_for("brands_view"))
 
 
 @app.route("/brands/add", methods=["POST"])

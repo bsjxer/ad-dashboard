@@ -76,6 +76,22 @@ CREATE TABLE IF NOT EXISTS brand_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_bk_brand ON brand_keys(brand);
 
+-- 위장 의심 계정: 경쟁사 브랜드명·제품명 검색에 걸렸지만 랜딩이 그 브랜드 도메인이 아닌 계정.
+-- 리셀러·제휴일 수도 있어 자동 등록하지 않고 사람이 확인한다(status: new/confirmed/rejected).
+CREATE TABLE IF NOT EXISTS suspects (
+    brand      TEXT,
+    page_id    TEXT,
+    page_name  TEXT,
+    term       TEXT,
+    landing    TEXT,
+    ad_id      TEXT,
+    n_ads      INTEGER DEFAULT 1,
+    first_seen TEXT,
+    last_seen  TEXT,
+    status     TEXT DEFAULT 'new',
+    PRIMARY KEY(brand, page_id)
+);
+
 -- 단축주소(bit.ly 등) → 실제 랜딩 주소 캐시
 CREATE TABLE IF NOT EXISTS links (
     url         TEXT PRIMARY KEY,
